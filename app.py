@@ -78,6 +78,7 @@ class NeighbourClient:
     name: Optional[str]
     lan_port: Optional[str]
     speed: Optional[str]
+    is_online: bool
 
 def extract_section(text: str, start_marker: str, end_marker: str) -> str:
     pattern = re.compile(
@@ -202,6 +203,10 @@ def parse_neighbour_clients(text: str) -> List[NeighbourClient]:
         friendly_match = re.search(r"friendlyname=([^\s]+)", block)
         dns_match = re.search(r"dnsname=([^\s]+)", block)
         name = friendly_match.group(1) if friendly_match else (dns_match.group(1) if dns_match else None)
+        if not name:
+            device_match = re.search(r"\b([A-Za-z0-9._-]+)\s+device_class=", block)
+            if device_match:
+                name = device_match.group(1)
 
         ip_match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", block)
         ip_address = ip_match.group(1) if ip_match else None
@@ -215,6 +220,7 @@ def parse_neighbour_clients(text: str) -> List[NeighbourClient]:
                 name=name,
                 lan_port=lan_port,
                 speed=speed,
+                is_online=bool(re.search(r"\bONLINE\b", block)),
             )
         )
     return clients
@@ -680,7 +686,7 @@ def render_lan_clients(clients: List[NeighbourClient]) -> None:
                 "Interface": client.interface or "k.A.",
                 "LAN-Port": client.lan_port or "k.A.",
                 "Speed": client.speed or "k.A.",
-                "Verbunden": "Ja" if client.ip_address else "Nein",
+                "Verbunden": "Ja" if client.is_online else "Nein",
             }
         )
     df = pd.DataFrame(rows)
