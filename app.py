@@ -145,6 +145,81 @@ def parse_dsl_snr(text: str) -> dict:
     }
 
 
+def extract_numeric_array_loose(text: str, label: str) -> List[int]:
+    match = re.search(rf"{re.escape(label)}\s*:\s*([0-9,\-]+)", text)
+    if not match:
+        return []
+    values = [int(value) for value in match.group(1).split(",") if value.strip()]
+    return values
+
+
+def extract_int_value(text: str, label: str) -> Optional[int]:
+    match = re.search(rf"{re.escape(label)}\s*:\s*([-\d]+)", text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def extract_float_value(text: str, label: str) -> Optional[float]:
+    match = re.search(rf"{re.escape(label)}\s*:\s*([-\d]+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def extract_kbits_rate(text: str, label: str) -> Optional[int]:
+    match = re.search(rf"{re.escape(label)}\s*:\s*(\d+)\s*kBits/s", text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def extract_section_block(text: str, header: str) -> str:
+    match = re.search(rf"{re.escape(header)}\n[-]+\n(.*?)(\n[A-Za-z].*?:|\Z)", text, re.DOTALL)
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def parse_dsl_metrics(text: str) -> dict:
+    section = extract_section_by_prefix(text, "#### BEGIN SECTION DSLManager_port_1_1")
+    if not section:
+        return {}
+
+    bridgetap_block = extract_section_block(section, "Bridgetaps")
+    bridgetap_found = None
+    bridgetap_length = None
+    if bridgetap_block:
+        if "no bridge taps found" in bridgetap_block:
+            bridgetap_found = False
+        else:
+            bridgetap_found = True
+            bridgetap_length = extract_int_value(bridgetap_block, "BT length (m)")
+
+    resyncs = extract_numeric_array_loose(section, "Resyncs")
+    retrains = extract_numeric_array_loose(section, "Host triggered Retrains")
+
+    return {
+        "loop_length_m": extract_int_value(section, "Estimated loop length"),
+        "ds_rate_kbits": extract_kbits_rate(section, "Downstream Rate"),
+        "us_rate_kbits": extract_kbits_rate(section, "Upstream Rate"),
+        "ds_margin_db": extract_float_value(section, "DS Margin (dB)"),
+        "us_margin_db": extract_float_value(section, "US Margin (dB)"),
+        "ds_attenuation_db": extract_float_value(section, "DS Attenuation (dB)"),
+        "us_attenuation_db": extract_float_value(section, "US Attenuation (dB)"),
+        "ds_total_fec": extract_int_value(section, "DS total FEC"),
+        "us_total_fec": extract_int_value(section, "US total FEC"),
+        "ds_total_crc": extract_int_value(section, "DS total CRC"),
+        "us_total_crc": extract_int_value(section, "US total CRC"),
+        "ds_es": extract_int_value(section, "DS ES"),
+        "us_es": extract_int_value(section, "US ES"),
+        "resyncs_24h": sum(resyncs) if resyncs else None,
+        "retrains_24h": sum(retrains) if retrains else None,
+        "bridgetap_found": bridgetap_found,
+        "bridgetap_length_m": bridgetap_length,
+    }
+
+
 def connection_quality_label(rssi: int, quality: int) -> str:
     if rssi != 0:
         if rssi >= -55:
@@ -211,6 +286,86 @@ def render_dsl_charts(dsl_data: dict) -> None:
             yaxis_title=label,
         )
         st.plotly_chart(fig, use_container_width=True)
+
+
+def format_mbit(value_kbits: Optional[int]) -> str:
+    if value_kbits is None:
+        return "k.A."
+    return f"{value_kbits / 1000:.1f} Mbit/s"
+
+
+def format_db(value: Optional[float]) -> str:
+    if value is None:
+        return "k.A."
+    return f"{value:.1f} dB"
+
+
+def format_count(value: Optional[int]) -> str:
+    if value is None:
+        return "k.A."
+    return f"{value:,}".replace(",", ".")
+
+
+def format_meters(value: Optional[int]) -> str:
+    if value is None:
+        return "k.A."
+    return f"{value} m"
+
+
+def assess_line_quality(metrics: dict) -> str:
+    ds_margin = metrics.get("ds_margin_db")
+    ds_attenuation = metrics.get("ds_attenuation_db")
+    ds_crc = metrics.get("ds_total_crc") or 0
+    us_crc = metrics.get("us_total_crc") or 0
+    ds_es = metrics.get("ds_es") or 0
+    us_es = metrics.get("us_es") or 0
+    resyncs = metrics.get("resyncs_24h") or 0
+    retrains = metrics.get("retrains_24h") or 0
+
+    if ds_crc + us_crc + ds_es + us_es + resyncs + retrains > 0:
+        return "Auffällig: Fehler/Resyncs erkannt – Leitung beobachten."
+    if ds_margin is not None and ds_attenuation is not None:
+        if ds_margin >= 8 and ds_attenuation <= 20:
+            return "Sehr gut: stabile Reserve bei geringer Dämpfung."
+        if ds_margin >= 6 and ds_attenuation <= 30:
+            return "Gut: solide Reserve und moderate Dämpfung."
+    return "Mittel: Werte ok, aber Reserve/Dämpfung könnten besser sein."
+
+
+def render_dsl_metrics(metrics: dict) -> None:
+    st.subheader("DSL Leitungswerte")
+    if not metrics:
+        st.info("Keine detaillierten DSL-Leitungswerte gefunden.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Leitungslänge", format_meters(metrics.get("loop_length_m")))
+    col1.metric("Sync Downstream", format_mbit(metrics.get("ds_rate_kbits")))
+    col1.metric("Sync Upstream", format_mbit(metrics.get("us_rate_kbits")))
+
+    col2.metric("SNR Downstream", format_db(metrics.get("ds_margin_db")))
+    col2.metric("SNR Upstream", format_db(metrics.get("us_margin_db")))
+    col2.metric("Leitungsdämpfung DS", format_db(metrics.get("ds_attenuation_db")))
+
+    col3.metric("Leitungsdämpfung US", format_db(metrics.get("us_attenuation_db")))
+    col3.metric("FEC (DS/US)", f"{format_count(metrics.get('ds_total_fec'))} / {format_count(metrics.get('us_total_fec'))}")
+    col3.metric("CRC (DS/US)", f"{format_count(metrics.get('ds_total_crc'))} / {format_count(metrics.get('us_total_crc'))}")
+
+    st.metric("ES (DS/US)", f"{format_count(metrics.get('ds_es'))} / {format_count(metrics.get('us_es'))}")
+    st.metric("Resyncs (24h)", format_count(metrics.get("resyncs_24h")))
+    st.metric("Host triggered Retrains (24h)", format_count(metrics.get("retrains_24h")))
+
+    bridgetap_found = metrics.get("bridgetap_found")
+    if bridgetap_found is True:
+        length = metrics.get("bridgetap_length_m")
+        if length is not None:
+            st.warning(f"Bridge Tap erkannt (ca. {length} m).")
+        else:
+            st.warning("Bridge Tap erkannt.")
+    elif bridgetap_found is False:
+        st.info("Keine Bridge Taps erkannt.")
+
+    st.success(assess_line_quality(metrics))
 
 
 def render_wlan_scan(networks: List[WifiNetwork]) -> None:
@@ -293,11 +448,13 @@ def build_dashboard(text: str) -> None:
     st.caption("Fokus auf DSL-Spektrum, WLAN-Umgebung, WLAN-Clients und LAN-Status.")
 
     dsl_data = parse_dsl_snr(text)
+    dsl_metrics = parse_dsl_metrics(text)
     networks = parse_wlan_env_scan(text)
     stations = parse_wlan_stations(text)
     ports = parse_lan_ports(text)
 
     render_dsl_charts(dsl_data)
+    render_dsl_metrics(dsl_metrics)
     render_wlan_scan(networks)
     render_wlan_clients(stations)
     render_lan_ports(ports)
