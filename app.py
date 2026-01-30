@@ -166,6 +166,13 @@ def extract_value(block: str, key: str) -> Optional[str]:
     return match.group(1).strip().strip("'")
 
 
+def extract_device_mac(text: str) -> Optional[str]:
+    match = re.search(r"^maca\s+([0-9a-f:]{17})\s*$", text, re.IGNORECASE | re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
 def parse_lan_ports(text: str) -> List[LanPort]:
     section = extract_section_by_prefix(text, "##### BEGIN SECTION Ethernet-ctlmgr-fbstateeth")
     ports = []
@@ -883,43 +890,61 @@ def assess_cable_limits(docsis_data: dict) -> tuple[str, str]:
     power_values = ds_powers + ofdm_powers
     if power_values:
         avg_power = sum(power_values) / len(power_values)
+        min_power = min(power_values)
+        max_power = max(power_values)
         if -10 <= avg_power <= 10:
-            lines.append(f"Power DS/OFDM Ø {avg_power:.1f} dBmV: im Soll (±10 dBmV).")
+            verdict = "im Soll"
         elif -15 <= avg_power <= 15:
-            lines.append(f"Power DS/OFDM Ø {avg_power:.1f} dBmV: leicht außerhalb (Soll ±10 dBmV).")
+            verdict = "leicht außerhalb"
             status = "warning"
         else:
-            lines.append(f"Power DS/OFDM Ø {avg_power:.1f} dBmV: außerhalb (Soll ±10 dBmV).")
+            verdict = "außerhalb"
             status = "warning"
+        lines.append(
+            f"**Power DS/OFDM**: Ø {avg_power:.1f} dBmV (Bereich {min_power:.1f}–{max_power:.1f}) → {verdict} "
+            "(Ziel: ±10 dBmV)."
+        )
     else:
-        lines.append("Power DS/OFDM: keine verwertbaren Werte gefunden.")
+        lines.append("**Power DS/OFDM**: keine verwertbaren Werte gefunden.")
 
     if us_powers:
         avg_us_power = sum(us_powers) / len(us_powers)
+        min_us_power = min(us_powers)
+        max_us_power = max(us_powers)
         if 35 <= avg_us_power <= 50:
-            lines.append(f"Power US Ø {avg_us_power:.1f} dBmV: im Soll (35–50 dBmV).")
+            verdict = "im Soll"
         elif 32 <= avg_us_power <= 51:
-            lines.append(f"Power US Ø {avg_us_power:.1f} dBmV: Grenzbereich (35–50 dBmV).")
+            verdict = "Grenzbereich"
             status = "warning"
         else:
-            lines.append(f"Power US Ø {avg_us_power:.1f} dBmV: außerhalb (35–50 dBmV).")
+            verdict = "außerhalb"
             status = "warning"
+        lines.append(
+            f"**Power US**: Ø {avg_us_power:.1f} dBmV (Bereich {min_us_power:.1f}–{max_us_power:.1f}) → {verdict} "
+            "(Ziel: 35–50 dBmV)."
+        )
     else:
-        lines.append("Power US: keine verwertbaren Werte gefunden.")
+        lines.append("**Power US**: keine verwertbaren Werte gefunden.")
 
     mse_values = [channel.get("MSE (dB)") for channel in downstream if channel.get("MSE (dB)") is not None]
     if mse_values:
         avg_mse = sum(mse_values) / len(mse_values)
+        min_mse = min(mse_values)
+        max_mse = max(mse_values)
         if avg_mse <= -33:
-            lines.append(f"MSE DS Ø {avg_mse:.1f} dB: im Soll (≤ -33 dB).")
+            verdict = "im Soll"
         elif avg_mse <= -30:
-            lines.append(f"MSE DS Ø {avg_mse:.1f} dB: Grenzbereich (≤ -33 dB).")
+            verdict = "Grenzbereich"
             status = "warning"
         else:
-            lines.append(f"MSE DS Ø {avg_mse:.1f} dB: außerhalb (≤ -33 dB).")
+            verdict = "außerhalb"
             status = "warning"
+        lines.append(
+            f"**MSE DS**: Ø {avg_mse:.1f} dB (Bereich {min_mse:.1f}–{max_mse:.1f}) → {verdict} "
+            "(Ziel: ≤ -33 dB)."
+        )
     else:
-        lines.append("MSE DS: keine verwertbaren Werte gefunden.")
+        lines.append("**MSE DS**: keine verwertbaren Werte gefunden.")
 
     modulation_values = []
     modulation_values.extend(
@@ -927,15 +952,16 @@ def assess_cable_limits(docsis_data: dict) -> tuple[str, str]:
     )
     modulation_values.extend(mod for mod in (channel.get("Max Mod") for channel in ofdm) if mod)
     if modulation_values:
-        invalid_mods = [mod for mod in modulation_values if "QAM" not in mod.upper() and "OFDM" not in mod.upper()]
+        unique_mods = sorted(set(modulation_values))
+        invalid_mods = [mod for mod in unique_mods if "QAM" not in mod.upper() and "OFDM" not in mod.upper()]
         if invalid_mods:
-            unique_invalid = ", ".join(sorted(set(invalid_mods)))
-            lines.append(f"Modulation: auffällig ({unique_invalid}).")
+            unique_invalid = ", ".join(invalid_mods)
+            lines.append(f"**Modulation**: auffällig ({unique_invalid}).")
             status = "warning"
         else:
-            lines.append("Modulation: typische QAM/OFDM-Werte erkannt.")
+            lines.append(f"**Modulation**: typische QAM/OFDM-Werte erkannt ({', '.join(unique_mods)}).")
     else:
-        lines.append("Modulation: keine verwertbaren Werte gefunden.")
+        lines.append("**Modulation**: keine verwertbaren Werte gefunden.")
 
     ds_freqs = [channel.get("Frequenz (MHz)") for channel in downstream if channel.get("Frequenz (MHz)") is not None]
     us_freqs = [channel.get("Frequenz (MHz)") for channel in upstream if channel.get("Frequenz (MHz)") is not None]
@@ -959,14 +985,20 @@ def assess_cable_limits(docsis_data: dict) -> tuple[str, str]:
 
     if ds_freqs or us_freqs or ofdm_ranges:
         if out_of_range:
-            lines.append("Frequenz: einzelne Kanäle außerhalb typischer DOCSIS-Bänder (DS 110–1218 MHz, US 5–85 MHz).")
+            examples = ", ".join(sorted({str(value) for value in out_of_range})[:3])
+            extra = f" Beispiele: {examples}." if examples else ""
+            lines.append(
+                "**Frequenz**: "
+                f"{len(out_of_range)} Kanal(e) außerhalb typischer DOCSIS-Bänder "
+                "(DS 110–1218 MHz, US 5–85 MHz)." + extra
+            )
             status = "warning"
         else:
-            lines.append("Frequenz: alle Kanäle innerhalb typischer DOCSIS-Bänder (DS 110–1218 MHz, US 5–85 MHz).")
+            lines.append("**Frequenz**: alle Kanäle innerhalb typischer DOCSIS-Bänder (DS 110–1218 MHz, US 5–85 MHz).")
     else:
-        lines.append("Frequenz: keine verwertbaren Werte gefunden.")
+        lines.append("**Frequenz**: keine verwertbaren Werte gefunden.")
 
-    return "\n".join(lines), status
+    return "\n".join(f"- {line}" for line in lines), status
 
 
 def render_dsl_metrics(metrics: dict) -> None:
@@ -1287,6 +1319,7 @@ def build_dashboard(text: str) -> None:
     st.caption("Fokus auf DSL/Cable, WLAN, Telefonie und LAN-Status.")
 
     access_technology = detect_access_technology(text)
+    device_mac = extract_device_mac(text)
     dsl_data = parse_dsl_snr(text)
     dsl_metrics = parse_dsl_metrics(text)
     docsis_data = parse_docsis_channels(text)
@@ -1296,6 +1329,12 @@ def build_dashboard(text: str) -> None:
     voip_accounts = parse_voip_accounts(text)
     neighbour_clients = parse_neighbour_clients(text)
     events = parse_events(text)
+
+    st.subheader("MAC-Adresse des Geräts")
+    if device_mac:
+        st.code(device_mac, language=None)
+    else:
+        st.info("Keine MAC-Adresse gefunden.")
 
     tab_dsl, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
         [access_technology, "LAN", "WLAN", "Telefonie", "Events"]
