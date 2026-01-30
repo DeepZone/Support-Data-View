@@ -617,9 +617,22 @@ def render_wlan_clients(stations: List[WifiStation]) -> None:
             }
         )
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True)
+    connected_df = df[df["Connect State"] > 0]
+    disconnected_df = df[df["Connect State"] <= 0]
 
-    chart_df = df.copy()
+    st.markdown("**Verbunden**")
+    if connected_df.empty:
+        st.info("Keine verbundenen WLAN-Clients gefunden.")
+    else:
+        st.dataframe(connected_df, use_container_width=True)
+
+    st.markdown("**Nicht verbunden**")
+    if disconnected_df.empty:
+        st.info("Keine nicht verbundenen WLAN-Clients gefunden.")
+    else:
+        st.dataframe(disconnected_df, use_container_width=True)
+
+    chart_df = connected_df.copy()
     chart_df["RSSI"] = pd.to_numeric(chart_df["RSSI"], errors="coerce")
     chart_df = chart_df[chart_df["RSSI"].notna()]
     if not chart_df.empty:
@@ -650,36 +663,42 @@ def render_lan_ports(ports: List[LanPort]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
-def render_neighbour_clients(clients: List[NeighbourClient]) -> None:
-    st.subheader("Clients (Neighbours)")
-    if not clients:
-        st.info("Keine Neighbours-Clientliste gefunden.")
+def render_lan_clients(clients: List[NeighbourClient]) -> None:
+    st.subheader("LAN Clients")
+    lan_clients = [client for client in clients if client.connection_type == "LAN"]
+    if not lan_clients:
+        st.info("Keine LAN-Clients gefunden.")
         return
 
     rows = []
-    for client in clients:
+    for client in lan_clients:
         rows.append(
             {
                 "MAC": client.mac,
                 "Name": client.name or "k.A.",
                 "IP": client.ip_address or "k.A.",
                 "Interface": client.interface or "k.A.",
-                "Typ": client.connection_type or "Unbekannt",
                 "LAN-Port": client.lan_port or "k.A.",
                 "Speed": client.speed or "k.A.",
+                "Verbunden": "Ja" if client.ip_address else "Nein",
             }
         )
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True)
 
-    lan_df = df[df["Typ"] == "LAN"]
-    wlan_df = df[df["Typ"] == "WLAN"]
-    if not lan_df.empty:
-        st.caption("LAN Clients")
-        st.dataframe(lan_df, use_container_width=True)
-    if not wlan_df.empty:
-        st.caption("WLAN Clients")
-        st.dataframe(wlan_df, use_container_width=True)
+    connected_df = df[df["Verbunden"] == "Ja"]
+    disconnected_df = df[df["Verbunden"] == "Nein"]
+
+    st.markdown("**Verbunden**")
+    if connected_df.empty:
+        st.info("Keine verbundenen LAN-Clients gefunden.")
+    else:
+        st.dataframe(connected_df, use_container_width=True)
+
+    st.markdown("**Nicht verbunden**")
+    if disconnected_df.empty:
+        st.info("Keine nicht verbundenen LAN-Clients gefunden.")
+    else:
+        st.dataframe(disconnected_df, use_container_width=True)
 
 
 def render_telephony(accounts: List[TelephonyAccount]) -> None:
@@ -782,10 +801,14 @@ def build_dashboard(text: str) -> None:
     voip_accounts = parse_voip_accounts(text)
     neighbour_clients = parse_neighbour_clients(text)
 
-    tab_dsl, tab_wlan, tab_phone, tab_lan = st.tabs(["DSL", "WLAN", "Telefonie", "LAN"])
+    tab_dsl, tab_lan, tab_wlan, tab_phone = st.tabs(["DSL", "LAN", "WLAN", "Telefonie"])
     with tab_dsl:
         render_dsl_charts(dsl_data)
         render_dsl_metrics(dsl_metrics)
+
+    with tab_lan:
+        render_lan_ports(ports)
+        render_lan_clients(neighbour_clients)
 
     with tab_wlan:
         render_wlan_scan(networks)
@@ -793,10 +816,6 @@ def build_dashboard(text: str) -> None:
 
     with tab_phone:
         render_telephony(voip_accounts)
-
-    with tab_lan:
-        render_lan_ports(ports)
-        render_neighbour_clients(neighbour_clients)
 
 
 def _is_running_with_streamlit() -> bool:
