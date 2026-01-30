@@ -250,6 +250,13 @@ def parse_events(text: str) -> List[EventEntry]:
     return entries
 
 
+def detect_access_technology(text: str) -> str:
+    annex_match = re.search(r"^annex\s+(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    if annex_match and "kabel" in annex_match.group(1).lower():
+        return "Cable"
+    return "DSL"
+
+
 def parse_dsl_snr(text: str) -> dict:
     section = extract_section_by_prefix(text, "DSL Spectrum")
     return {
@@ -832,6 +839,7 @@ def build_dashboard(text: str) -> None:
     st.header("Support-Data-Visualisierung")
     st.caption("Fokus auf DSL, WLAN, Telefonie und LAN-Status.")
 
+    access_technology = detect_access_technology(text)
     dsl_data = parse_dsl_snr(text)
     dsl_metrics = parse_dsl_metrics(text)
     networks = parse_wlan_env_scan(text)
@@ -842,7 +850,7 @@ def build_dashboard(text: str) -> None:
     events = parse_events(text)
 
     tab_dsl, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
-        ["DSL", "LAN", "WLAN", "Telefonie", "Events"]
+        [access_technology, "LAN", "WLAN", "Telefonie", "Events"]
     )
     with tab_dsl:
         render_dsl_charts(dsl_data)
