@@ -1590,9 +1590,9 @@ def main() -> None:
         <style>
             .mac-address-card {
                 position: fixed;
-                top: 0.75rem;
+                top: 2.5rem;
                 right: 1.25rem;
-                z-index: 1000;
+                z-index: 2000;
                 padding: 0.6rem 0.9rem;
                 border-radius: 0.6rem;
                 background: var(--secondary-background-color);
@@ -1614,7 +1614,9 @@ def main() -> None:
                 font-size: 0.95rem;
                 word-break: break-all;
             }
-            [data-testid="stDeployButton"] {
+            [data-testid="stDeployButton"],
+            [data-testid="stToolbar"],
+            [data-testid="stHeader"] {
                 display: none;
             }
             @media (max-width: 768px) {
