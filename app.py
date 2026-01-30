@@ -1,9 +1,10 @@
 import base64
+import html
 import re
-import zlib
-from dataclasses import dataclass
 import sys
 import textwrap
+import zlib
+from dataclasses import dataclass
 from typing import List, Optional
 
 import pandas as pd
@@ -1540,13 +1541,25 @@ def build_dashboard(text: str) -> None:
     neighbour_clients = parse_neighbour_clients(text)
     events = parse_events(text)
 
-    mac_label = "MAC-Adresse"
+    mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
+    mac_value_safe = html.escape(mac_value)
     st.markdown(
         f"""
         <div class="mac-address-card" aria-label="{mac_label}">
             <div class="mac-address-title">{mac_label}</div>
-            <div class="mac-address-value">{mac_value}</div>
+            <div class="mac-address-row">
+                <div class="mac-address-value" id="mac-address-value">{mac_value_safe}</div>
+                <button
+                    class="mac-address-copy"
+                    type="button"
+                    aria-label="MAC-Adresse kopieren"
+                    data-copy="{mac_value_safe}"
+                    onclick="navigator.clipboard.writeText(this.dataset.copy); this.classList.add('copied'); this.textContent='Kopiert'; setTimeout(() => {{ this.classList.remove('copied'); this.textContent='Kopieren'; }}, 1500);"
+                >
+                    Kopieren
+                </button>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1584,7 +1597,7 @@ def _is_running_with_streamlit() -> bool:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Support-Data-View", layout="wide")
+    st.set_page_config(page_title="Support-Daten Viewer", layout="wide")
     st.markdown(
         """
         <style>
@@ -1614,6 +1627,30 @@ def main() -> None:
                 font-size: 0.95rem;
                 word-break: break-all;
             }
+            .mac-address-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.5rem;
+            }
+            .mac-address-copy {
+                border: 1px solid rgba(120, 120, 120, 0.4);
+                background: transparent;
+                color: inherit;
+                padding: 0.25rem 0.5rem;
+                border-radius: 0.4rem;
+                font-size: 0.75rem;
+                cursor: pointer;
+                transition: background 0.2s ease, color 0.2s ease;
+                white-space: nowrap;
+            }
+            .mac-address-copy:hover {
+                background: rgba(120, 120, 120, 0.15);
+            }
+            .mac-address-copy.copied {
+                background: rgba(76, 175, 80, 0.2);
+                color: #2e7d32;
+            }
             [data-testid="stDeployButton"],
             [data-testid="stToolbar"],
             [data-testid="stHeader"] {
@@ -1630,7 +1667,7 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("Support-Data-View")
+    st.title("Support-Daten Viewer")
     st.markdown(
         "Lade eine Support-Data TXT hoch (z. B. von einer FRITZ!Box), "
         "um DSL- und WLAN-Informationen grafisch auszuwerten."
