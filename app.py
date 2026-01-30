@@ -1,11 +1,14 @@
 import re
 from dataclasses import dataclass
+import sys
+import textwrap
 from typing import List, Optional
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 
 
 @dataclass
@@ -275,6 +278,10 @@ def build_dashboard(text: str) -> None:
     )
 
 
+def _is_running_with_streamlit() -> bool:
+    return get_script_run_ctx(suppress_warning=True) is not None
+
+
 def main() -> None:
     st.set_page_config(page_title="Support-Data-View", layout="wide")
     st.title("Support-Data-View")
@@ -293,4 +300,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if _is_running_with_streamlit():
+        main()
+    else:
+        print(
+            textwrap.dedent(
+                """\
+                Dieses Projekt ist eine Streamlit-App.
+                Bitte starte sie mit:
+
+                    streamlit run app.py
+                """
+            )
+        )
+        sys.exit(0)
