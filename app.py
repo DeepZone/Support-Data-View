@@ -293,4 +293,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+    if get_script_run_ctx() is None:
+        from streamlit.web import bootstrap
+
+        bootstrap.run(__file__, "streamlit run", [], {})
+    else:
+        main()
