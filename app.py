@@ -324,6 +324,37 @@ def extract_device_mac(text: str) -> Optional[str]:
     return match.group(1).upper()
 
 
+def parse_fritz_model(text: str) -> Optional[str]:
+    match = re.search(r"^CONFIG_PRODUKT_NAME\s*=\s*(.+)$", text, re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip().strip("'")
+
+
+def parse_fritz_uptime(text: str) -> Optional[str]:
+    match = re.search(r"^uptime:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def parse_fritz_firmware_version(text: str) -> Optional[str]:
+    version_match = re.search(r"^#####\s+TITLE\s+Version\s+(.+)$", text, re.MULTILINE)
+    if not version_match:
+        return None
+    version = version_match.group(1).strip()
+    parts = [part for part in version.split(".") if part]
+    if len(parts) > 1:
+        version = ".".join(parts[1:])
+    elif len(version) > 3:
+        version = version[3:]
+    subversion_match = re.search(r"^#####\s+TITLE\s+SubVersion\s+(.+)$", text, re.MULTILINE)
+    if subversion_match:
+        subversion = subversion_match.group(1).strip()
+        version = f"{version}{subversion}"
+    return version
+
+
 def parse_lan_ports(text: str) -> List[LanPort]:
     section = extract_section_by_prefix(text, "##### BEGIN SECTION Ethernet-ctlmgr-fbstateeth")
     ports = []
@@ -1524,8 +1555,15 @@ def render_events(events: List[EventEntry]) -> None:
 
 
 def build_dashboard(text: str) -> None:
-    st.header("Support-Data-Visualisierung")
-    st.caption("Fokus auf DSL/Cable, WLAN, Telefonie und LAN-Status.")
+    fritz_model = parse_fritz_model(text) or "Unbekannt"
+    firmware_version = parse_fritz_firmware_version(text) or "Unbekannt"
+    uptime = parse_fritz_uptime(text) or "Unbekannt"
+
+    st.subheader("FRITZ!Box Informationen")
+    info_columns = st.columns(3)
+    info_columns[0].metric("Modell", fritz_model)
+    info_columns[1].metric("Firmwareversion", firmware_version)
+    info_columns[2].metric("Uptime", uptime)
 
     access_technology = detect_access_technology(text)
     device_mac = extract_device_mac(text)
@@ -1668,10 +1706,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.title("Support-Daten Viewer")
-    st.markdown(
-        "Lade eine Support-Data TXT hoch (z. B. von einer FRITZ!Box), "
-        "um DSL- und WLAN-Informationen grafisch auszuwerten."
-    )
 
     uploaded_file = st.file_uploader("Support-Data TXT", type=["txt"])
     if uploaded_file is None:
