@@ -80,6 +80,13 @@ class NeighbourClient:
     speed: Optional[str]
     is_online: bool
 
+
+@dataclass
+class EventEntry:
+    date: str
+    time: str
+    message: str
+
 def extract_section(text: str, start_marker: str, end_marker: str) -> str:
     pattern = re.compile(
         rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
@@ -224,6 +231,23 @@ def parse_neighbour_clients(text: str) -> List[NeighbourClient]:
             )
         )
     return clients
+
+
+def parse_events(text: str) -> List[EventEntry]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION Events Events")
+    if not section:
+        return []
+
+    entries = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("Events") or set(stripped) == {"-"}:
+            continue
+        match = re.match(r"(\d{2}\.\d{2}\.\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(.*)", stripped)
+        if not match:
+            continue
+        entries.append(EventEntry(date=match.group(1), time=match.group(2), message=match.group(3)))
+    return entries
 
 
 def parse_dsl_snr(text: str) -> dict:
@@ -795,6 +819,15 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
                 )
 
 
+def render_events(events: List[EventEntry]) -> None:
+    st.subheader("Events")
+    if not events:
+        st.info("Keine Events gefunden.")
+        return
+    df = pd.DataFrame([event.__dict__ for event in events])
+    st.dataframe(df, use_container_width=True)
+
+
 def build_dashboard(text: str) -> None:
     st.header("Support-Data-Visualisierung")
     st.caption("Fokus auf DSL, WLAN, Telefonie und LAN-Status.")
@@ -806,8 +839,11 @@ def build_dashboard(text: str) -> None:
     ports = parse_lan_ports(text)
     voip_accounts = parse_voip_accounts(text)
     neighbour_clients = parse_neighbour_clients(text)
+    events = parse_events(text)
 
-    tab_dsl, tab_lan, tab_wlan, tab_phone = st.tabs(["DSL", "LAN", "WLAN", "Telefonie"])
+    tab_dsl, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
+        ["DSL", "LAN", "WLAN", "Telefonie", "Events"]
+    )
     with tab_dsl:
         render_dsl_charts(dsl_data)
         render_dsl_metrics(dsl_metrics)
@@ -822,6 +858,9 @@ def build_dashboard(text: str) -> None:
 
     with tab_phone:
         render_telephony(voip_accounts)
+
+    with tab_events:
+        render_events(events)
 
 
 def _is_running_with_streamlit() -> bool:
