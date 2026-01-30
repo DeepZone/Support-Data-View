@@ -452,7 +452,24 @@ def parse_voip_accounts(text: str) -> List[TelephonyAccount]:
 
 
 def extract_docsis_state(text: str) -> str:
-    return extract_section(text, "##### BEGIN SECTION DOCSIS Supportdata cable", "##### END SECTION DOCSIS")
+    start_marker = "##### BEGIN SECTION DOCSIS Supportdata cable"
+    end_marker = "##### END SECTION DOCSIS"
+    pattern = re.compile(
+        rf"{re.escape(start_marker)}\n(.*?)(?=^\s*{re.escape(end_marker)}\s*$)",
+        re.DOTALL | re.MULTILINE,
+    )
+    match = pattern.search(text)
+    if match:
+        return match.group(1)
+
+    showdocsis_marker = "showdocsisstate:"
+    start_index = text.find(showdocsis_marker)
+    if start_index == -1:
+        return ""
+    end_index = text.find(end_marker, start_index)
+    if end_index == -1:
+        return text[start_index:]
+    return text[start_index:end_index]
 
 
 def parse_docsis_value(text: str, label: str) -> Optional[str]:
