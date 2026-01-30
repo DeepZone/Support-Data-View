@@ -451,6 +451,218 @@ def parse_voip_accounts(text: str) -> List[TelephonyAccount]:
     return list(accounts.values())
 
 
+def extract_docsis_state(text: str) -> str:
+    return extract_section(text, "##### BEGIN SECTION DOCSIS Supportdata cable", "##### END SECTION DOCSIS")
+
+
+def parse_docsis_value(text: str, label: str) -> Optional[str]:
+    match = re.search(rf"^\s*{re.escape(label)}:\s*(.+)$", text, re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def parse_table_rows(section: str, start_marker: str, columns: List[str]) -> List[dict]:
+    start_index = section.find(start_marker)
+    if start_index == -1:
+        return []
+    lines = section[start_index:].splitlines()
+    data_lines = []
+    separator_found = False
+    for line in lines:
+        if not separator_found:
+            if re.match(r"\s*-{2,}\+", line):
+                separator_found = True
+            continue
+        if not line.strip():
+            break
+        if line.strip().startswith("|"):
+            continue
+        if re.match(r"\s*-{2,}", line):
+            continue
+        if "|" not in line:
+            break
+        data_lines.append(line)
+
+    rows = []
+    for line in data_lines:
+        parts = [part.strip() for part in line.split("|")]
+        if parts and parts[0] == "":
+            parts = parts[1:]
+        if parts and parts[-1] == "":
+            parts = parts[:-1]
+        if len(parts) < len(columns):
+            continue
+        row = dict(zip(columns, parts[: len(columns)]))
+        rows.append(row)
+    return rows
+
+
+def parse_float(value: str) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_int(value: str) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def is_plausible_channel(active: str, frequency: Optional[float], power: Optional[float], modulation: str) -> bool:
+    if active.strip().upper() != "YES":
+        return False
+    if frequency is None or frequency <= 0:
+        return False
+    if power is None or abs(power) < 0.1:
+        return False
+    if modulation.strip().lower() in {"er", "none", "0"}:
+        return False
+    return True
+
+
+def parse_docsis_channels(text: str) -> dict:
+    section = extract_docsis_state(text)
+    if not section:
+        return {}
+
+    operational_mode = parse_docsis_value(section, "Operational mode")
+    frequency_plan = parse_docsis_value(section, "Frequency plan")
+    modem_status = parse_docsis_value(section, "Modem status")
+
+    upstream_columns = [
+        "ID",
+        "Active",
+        "Frequency",
+        "SymRate",
+        "ChWidth",
+        "Attenuation",
+        "Power",
+        "Power16",
+        "P-High",
+        "P-Low",
+        "P-DRW-High",
+        "P-DRW-Low",
+        "DeltaPF",
+        "Mod",
+        "Mux",
+    ]
+    downstream_columns = [
+        "ID",
+        "Active",
+        "Frequency",
+        "Primary",
+        "Power",
+        "MSE",
+        "CorrWords",
+        "UncorrWords",
+        "QAMLock",
+        "FECLock",
+        "MPEGLock",
+        "Mod",
+        "Annex",
+    ]
+    ofdm_columns = [
+        "ID",
+        "Active",
+        "Frequency",
+        "Primary",
+        "PLC Freq",
+        "Power",
+        "MER",
+        "CorrWords",
+        "UncorrWords",
+        "Max Mod",
+        "Rolloff Period",
+        "Cyclic Prefix",
+        "FFT Size",
+    ]
+
+    upstream_rows = parse_table_rows(section, "Single-Carrier Channels", upstream_columns)
+    downstream_rows = parse_table_rows(section, "Single-Carrier Receivers", downstream_columns)
+    ofdm_rows = parse_table_rows(section, "Multi-Carrier (OFDM) Receivers", ofdm_columns)
+
+    upstream_channels = []
+    for row in upstream_rows:
+        frequency = parse_float(row["Frequency"])
+        power = parse_float(row["Power"])
+        if not is_plausible_channel(row["Active"], frequency, power, row["Mod"]):
+            continue
+        upstream_channels.append(
+            {
+                "ID": parse_int(row["ID"]),
+                "Aktiv": row["Active"],
+                "Frequenz (MHz)": frequency,
+                "Power (dBmV)": power,
+                "Modulation": row["Mod"],
+            }
+        )
+
+    downstream_channels = []
+    for row in downstream_rows:
+        frequency = parse_float(row["Frequency"])
+        power = parse_float(row["Power"])
+        mse = parse_float(row["MSE"])
+        if not is_plausible_channel(row["Active"], frequency, power, row["Mod"]):
+            continue
+        if mse is None or abs(mse) < 0.1:
+            continue
+        downstream_channels.append(
+            {
+                "ID": parse_int(row["ID"]),
+                "Aktiv": row["Active"],
+                "Frequenz (MHz)": frequency,
+                "Power (dBmV)": power,
+                "MSE (dB)": mse,
+                "CorrWords": parse_int(row["CorrWords"]) or 0,
+                "UncorrWords": parse_int(row["UncorrWords"]) or 0,
+                "Modulation": row["Mod"],
+            }
+        )
+
+    ofdm_channels = []
+    for row in ofdm_rows:
+        freq_match = re.match(r"([\d.]+)\s*-\s*([\d.]+)", row["Frequency"])
+        if not freq_match:
+            continue
+        freq_start = parse_float(freq_match.group(1))
+        freq_end = parse_float(freq_match.group(2))
+        power = parse_float(row["Power"])
+        mer = parse_float(row["MER"])
+        if row["Active"].strip().upper() != "YES":
+            continue
+        if freq_start is None or freq_start <= 0 or freq_end is None or freq_end <= 0:
+            continue
+        if power is None or abs(power) < 0.1:
+            continue
+        if mer is None or mer <= 0:
+            continue
+        ofdm_channels.append(
+            {
+                "ID": parse_int(row["ID"]),
+                "Aktiv": row["Active"],
+                "Frequenz (MHz)": f"{freq_start:.3f} - {freq_end:.3f}",
+                "Power (dBmV)": power,
+                "MER (dB)": mer,
+                "CorrWords": parse_int(row["CorrWords"]) or 0,
+                "UncorrWords": parse_int(row["UncorrWords"]) or 0,
+                "Max Mod": row["Max Mod"],
+            }
+        )
+
+    return {
+        "operational_mode": operational_mode,
+        "frequency_plan": frequency_plan,
+        "modem_status": modem_status,
+        "upstream_channels": upstream_channels,
+        "downstream_channels": downstream_channels,
+        "ofdm_channels": ofdm_channels,
+    }
+
+
 def connection_quality_label(rssi: int, quality: int) -> str:
     if rssi != 0:
         if rssi >= -55:
@@ -556,6 +768,7 @@ def format_bytes(value: Optional[int]) -> str:
 def format_bool(value: bool) -> str:
     return "Ja" if value else "Nein"
 
+
 def assess_line_quality(metrics: dict) -> str:
     ds_margin = metrics.get("ds_margin_db")
     ds_attenuation = metrics.get("ds_attenuation_db")
@@ -574,6 +787,68 @@ def assess_line_quality(metrics: dict) -> str:
         if ds_margin >= 6 and ds_attenuation <= 30:
             return "Gut: solide Reserve und moderate Dämpfung."
     return "Mittel: Werte ok, aber Reserve/Dämpfung könnten besser sein."
+
+
+def assess_cable_quality(docsis_data: dict) -> tuple[str, str]:
+    downstream = docsis_data.get("downstream_channels", [])
+    ofdm = docsis_data.get("ofdm_channels", [])
+
+    corr_total = sum(channel.get("CorrWords", 0) for channel in downstream) + sum(
+        channel.get("CorrWords", 0) for channel in ofdm
+    )
+    uncorr_total = sum(channel.get("UncorrWords", 0) for channel in downstream) + sum(
+        channel.get("UncorrWords", 0) for channel in ofdm
+    )
+    power_values = [channel.get("Power (dBmV)") for channel in downstream + ofdm if channel.get("Power (dBmV)") is not None]
+    mse_values = [channel.get("MSE (dB)") for channel in downstream if channel.get("MSE (dB)") is not None]
+    mer_values = [channel.get("MER (dB)") for channel in ofdm if channel.get("MER (dB)") is not None]
+
+    notes = []
+    status = "success"
+
+    if uncorr_total > 0:
+        notes.append("Unkorrigierbare Fehler (UncorrWords) vorhanden.")
+        status = "warning"
+    if corr_total > 1_000_000:
+        notes.append("Viele korrigierte Fehler (CorrWords) – beobachten.")
+        status = "warning"
+
+    if power_values:
+        avg_power = sum(power_values) / len(power_values)
+        if -10 <= avg_power <= 10:
+            pass
+        elif -15 <= avg_power <= 15:
+            notes.append("Power leicht außerhalb des Idealbereichs (±10 dBmV).")
+            status = "warning"
+        else:
+            notes.append("Power deutlich außerhalb des Idealbereichs (±10 dBmV).")
+            status = "warning"
+
+    if mse_values:
+        avg_mse = sum(mse_values) / len(mse_values)
+        if avg_mse <= -33:
+            pass
+        elif avg_mse <= -30:
+            notes.append("MSE im Grenzbereich (DS).")
+            status = "warning"
+        else:
+            notes.append("MSE auffällig (DS) – Signalqualität prüfen.")
+            status = "warning"
+
+    if mer_values:
+        avg_mer = sum(mer_values) / len(mer_values)
+        if avg_mer >= 38:
+            pass
+        elif avg_mer >= 33:
+            notes.append("MER im Grenzbereich (OFDM).")
+            status = "warning"
+        else:
+            notes.append("MER auffällig (OFDM) – Signalqualität prüfen.")
+            status = "warning"
+
+    if not notes:
+        return "Leitung wirkt stabil (Power/MSE/MER im grünen Bereich).", "success"
+    return " ".join(notes), status
 
 
 def render_dsl_metrics(metrics: dict) -> None:
@@ -610,6 +885,53 @@ def render_dsl_metrics(metrics: dict) -> None:
         st.info("Keine Bridge Taps erkannt.")
 
     st.success(assess_line_quality(metrics))
+
+
+def render_cable_dashboard(docsis_data: dict) -> None:
+    st.subheader("DOCSIS Überblick")
+    if not docsis_data:
+        st.info("Keine DOCSIS-Daten gefunden.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Operational Mode", docsis_data.get("operational_mode") or "k.A.")
+    col2.metric("Frequency Plan", docsis_data.get("frequency_plan") or "k.A.")
+    col3.metric("Modem Status", docsis_data.get("modem_status") or "k.A.")
+
+    downstream = docsis_data.get("downstream_channels", [])
+    ofdm = docsis_data.get("ofdm_channels", [])
+    upstream = docsis_data.get("upstream_channels", [])
+
+    st.subheader("Downstream Kanäle (DS)")
+    if downstream:
+        st.dataframe(pd.DataFrame(downstream), use_container_width=True)
+    else:
+        st.info("Keine plausiblen Downstream-Kanäle gefunden.")
+
+    if ofdm:
+        st.markdown("**OFDM (Downstream)**")
+        st.dataframe(pd.DataFrame(ofdm), use_container_width=True)
+
+    st.subheader("Upstream Kanäle (US)")
+    if upstream:
+        st.dataframe(pd.DataFrame(upstream), use_container_width=True)
+    else:
+        st.info("Keine plausiblen Upstream-Kanäle gefunden.")
+
+    corr_total = sum(channel.get("CorrWords", 0) for channel in downstream) + sum(
+        channel.get("CorrWords", 0) for channel in ofdm
+    )
+    uncorr_total = sum(channel.get("UncorrWords", 0) for channel in downstream) + sum(
+        channel.get("UncorrWords", 0) for channel in ofdm
+    )
+    st.metric("CorrWords (gesamt)", format_count(corr_total))
+    st.metric("UncorrWords (gesamt)", format_count(uncorr_total))
+
+    assessment, status = assess_cable_quality(docsis_data)
+    if status == "success":
+        st.success(assessment)
+    else:
+        st.warning(assessment)
 
 
 def render_wlan_scan(networks: List[WifiNetwork]) -> None:
@@ -837,11 +1159,12 @@ def render_events(events: List[EventEntry]) -> None:
 
 def build_dashboard(text: str) -> None:
     st.header("Support-Data-Visualisierung")
-    st.caption("Fokus auf DSL, WLAN, Telefonie und LAN-Status.")
+    st.caption("Fokus auf DSL/Cable, WLAN, Telefonie und LAN-Status.")
 
     access_technology = detect_access_technology(text)
     dsl_data = parse_dsl_snr(text)
     dsl_metrics = parse_dsl_metrics(text)
+    docsis_data = parse_docsis_channels(text)
     networks = parse_wlan_env_scan(text)
     stations = parse_wlan_stations(text)
     ports = parse_lan_ports(text)
@@ -853,8 +1176,11 @@ def build_dashboard(text: str) -> None:
         [access_technology, "LAN", "WLAN", "Telefonie", "Events"]
     )
     with tab_dsl:
-        render_dsl_charts(dsl_data)
-        render_dsl_metrics(dsl_metrics)
+        if access_technology == "Cable":
+            render_cable_dashboard(docsis_data)
+        else:
+            render_dsl_charts(dsl_data)
+            render_dsl_metrics(dsl_metrics)
 
     with tab_lan:
         render_lan_ports(ports)
