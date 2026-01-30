@@ -136,6 +136,8 @@ def parse_lan_ports(text: str) -> List[LanPort]:
 def parse_dsl_snr(text: str) -> dict:
     section = extract_section_by_prefix(text, "DSL Spectrum")
     return {
+        "Bits Array DS": extract_numeric_array(section, "Bits Array DS"),
+        "Bits Array US": extract_numeric_array(section, "Bits Array US"),
         "SNR Array DS": extract_numeric_array(section, "SNR Array DS"),
         "SNR Array US": extract_numeric_array(section, "SNR Array US"),
         "HLOG DS Array": extract_numeric_array(section, "HLOG DS Array"),
@@ -164,45 +166,51 @@ def connection_quality_label(rssi: int, quality: int) -> str:
 def render_dsl_charts(dsl_data: dict) -> None:
     st.subheader("DSL Spektrum (SNR & HLOG)")
     if (
-        not dsl_data["SNR Array DS"]
+        not dsl_data["Bits Array DS"]
+        and not dsl_data["Bits Array US"]
+        and not dsl_data["SNR Array DS"]
         and not dsl_data["SNR Array US"]
         and not dsl_data["HLOG DS Array"]
         and not dsl_data["HLOG US Array"]
     ):
         st.info("Keine DSL-Spektrumsdaten gefunden.")
         return
+    chart_specs = [
+        ("Bits", "Bits Array DS", "Bits Array US"),
+        ("SNR", "SNR Array DS", "SNR Array US"),
+        ("HLOG", "HLOG DS Array", "HLOG US Array"),
+    ]
 
-    if dsl_data["SNR Array DS"]:
-        fig_ds = px.line(
-            y=dsl_data["SNR Array DS"],
-            labels={"index": "Ton", "y": "SNR (DS)"},
-            title="SNR Array DS",
+    for label, ds_key, us_key in chart_specs:
+        ds_values = dsl_data[ds_key]
+        us_values = dsl_data[us_key]
+        if not ds_values and not us_values:
+            continue
+        fig = go.Figure()
+        if ds_values:
+            fig.add_trace(
+                go.Scatter(
+                    y=ds_values,
+                    mode="lines",
+                    name="DS",
+                    line={"color": "#1f77b4"},
+                )
+            )
+        if us_values:
+            fig.add_trace(
+                go.Scatter(
+                    y=us_values,
+                    mode="lines",
+                    name="US",
+                    line={"color": "#ff7f0e"},
+                )
+            )
+        fig.update_layout(
+            title=f"{label} (DS/US)",
+            xaxis_title="Ton",
+            yaxis_title=label,
         )
-        st.plotly_chart(fig_ds, use_container_width=True)
-
-    if dsl_data["SNR Array US"]:
-        fig_us = px.line(
-            y=dsl_data["SNR Array US"],
-            labels={"index": "Ton", "y": "SNR (US)"},
-            title="SNR Array US",
-        )
-        st.plotly_chart(fig_us, use_container_width=True)
-
-    if dsl_data["HLOG DS Array"]:
-        fig_hlog_ds = px.line(
-            y=dsl_data["HLOG DS Array"],
-            labels={"index": "Ton", "y": "HLOG (DS)"},
-            title="HLOG Array DS",
-        )
-        st.plotly_chart(fig_hlog_ds, use_container_width=True)
-
-    if dsl_data["HLOG US Array"]:
-        fig_hlog_us = px.line(
-            y=dsl_data["HLOG US Array"],
-            labels={"index": "Ton", "y": "HLOG (US)"},
-            title="HLOG Array US",
-        )
-        st.plotly_chart(fig_hlog_us, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_wlan_scan(networks: List[WifiNetwork]) -> None:
