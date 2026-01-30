@@ -68,6 +68,17 @@ class TelephonyAccount:
     loopback_connected: Optional[int] = None
     loopback_failed: Optional[int] = None
 
+
+@dataclass
+class NeighbourClient:
+    mac: str
+    interface: str
+    connection_type: Optional[str]
+    ip_address: Optional[str]
+    name: Optional[str]
+    lan_port: Optional[str]
+    speed: Optional[str]
+
 def extract_section(text: str, start_marker: str, end_marker: str) -> str:
     pattern = re.compile(
         rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
@@ -160,6 +171,53 @@ def parse_lan_ports(text: str) -> List[LanPort]:
         speed_match = re.search(r"(\d+Mbps)", details)
         ports.append(LanPort(port=port, status=status, speed=speed_match.group(1) if speed_match else None))
     return ports
+
+
+def parse_neighbour_clients(text: str) -> List[NeighbourClient]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION neighbours Neighbors")
+    if not section:
+        return []
+
+    matches = list(re.finditer(r"\[(?P<mac>[0-9a-f:]{17})\]", section, re.IGNORECASE))
+    clients = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(section)
+        block = section[start:end]
+
+        interface_match = re.search(r"\(([^,]+)", block)
+        interface = interface_match.group(1).strip() if interface_match else ""
+        interface_base = interface.split("_")[-1].lower()
+        connection_type = None
+        if interface_base.startswith("eth"):
+            connection_type = "LAN"
+        elif interface_base.startswith("ath"):
+            connection_type = "WLAN"
+
+        lan_port_match = re.search(r"lanport=([^,)\s]+)", block)
+        lan_port = lan_port_match.group(1) if lan_port_match and lan_port_match.group(1) else None
+        speed_match = re.search(r"speed=([0-9]+)", block)
+        speed = speed_match.group(1) if speed_match else None
+
+        friendly_match = re.search(r"friendlyname=([^\s]+)", block)
+        dns_match = re.search(r"dnsname=([^\s]+)", block)
+        name = friendly_match.group(1) if friendly_match else (dns_match.group(1) if dns_match else None)
+
+        ip_match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", block)
+        ip_address = ip_match.group(1) if ip_match else None
+
+        clients.append(
+            NeighbourClient(
+                mac=match.group("mac"),
+                interface=interface,
+                connection_type=connection_type,
+                ip_address=ip_address,
+                name=name,
+                lan_port=lan_port,
+                speed=speed,
+            )
+        )
+    return clients
 
 
 def parse_dsl_snr(text: str) -> dict:
@@ -592,6 +650,38 @@ def render_lan_ports(ports: List[LanPort]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+def render_neighbour_clients(clients: List[NeighbourClient]) -> None:
+    st.subheader("Clients (Neighbours)")
+    if not clients:
+        st.info("Keine Neighbours-Clientliste gefunden.")
+        return
+
+    rows = []
+    for client in clients:
+        rows.append(
+            {
+                "MAC": client.mac,
+                "Name": client.name or "k.A.",
+                "IP": client.ip_address or "k.A.",
+                "Interface": client.interface or "k.A.",
+                "Typ": client.connection_type or "Unbekannt",
+                "LAN-Port": client.lan_port or "k.A.",
+                "Speed": client.speed or "k.A.",
+            }
+        )
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True)
+
+    lan_df = df[df["Typ"] == "LAN"]
+    wlan_df = df[df["Typ"] == "WLAN"]
+    if not lan_df.empty:
+        st.caption("LAN Clients")
+        st.dataframe(lan_df, use_container_width=True)
+    if not wlan_df.empty:
+        st.caption("WLAN Clients")
+        st.dataframe(wlan_df, use_container_width=True)
+
+
 def render_telephony(accounts: List[TelephonyAccount]) -> None:
     st.subheader("Telefonie (VoIP)")
     if not accounts:
@@ -690,6 +780,7 @@ def build_dashboard(text: str) -> None:
     stations = parse_wlan_stations(text)
     ports = parse_lan_ports(text)
     voip_accounts = parse_voip_accounts(text)
+    neighbour_clients = parse_neighbour_clients(text)
 
     tab_dsl, tab_wlan, tab_phone, tab_lan = st.tabs(["DSL", "WLAN", "Telefonie", "LAN"])
     with tab_dsl:
@@ -705,11 +796,7 @@ def build_dashboard(text: str) -> None:
 
     with tab_lan:
         render_lan_ports(ports)
-        st.subheader("LAN Clients")
-        st.info(
-            "In der hochgeladenen Datei wurde keine explizite LAN-Clientliste gefunden. "
-            "Wenn eine Hosts-Liste oder ein Mesh-Export vorhanden ist, wird dieser Bereich automatisch gefüllt."
-        )
+        render_neighbour_clients(neighbour_clients)
 
 
 def _is_running_with_streamlit() -> bool:
