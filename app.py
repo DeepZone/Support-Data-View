@@ -52,6 +52,16 @@ class WifiRadioLoad:
 
 
 @dataclass
+class WifiNoiseFloorEntry:
+    radio_id: int
+    frequency_mhz: int
+    channel: int
+    noise_floor: int
+    load: int
+    band: str
+
+
+@dataclass
 class TelephonyAccount:
     index: int
     number: str
@@ -234,6 +244,49 @@ def parse_wlan_radio_load(text: str) -> List[WifiRadioLoad]:
             )
         )
     return radio_loads
+
+
+def parse_wlan_noisefloor(text: str) -> List[WifiNoiseFloorEntry]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION WLAN_SCAN_RESULTS WLAN scan results")
+    if not section:
+        return []
+
+    radio_header = re.compile(r"Scan results for radio '(\d+)':")
+    entries: List[WifiNoiseFloorEntry] = []
+    matches = list(radio_header.finditer(section))
+    for idx, match in enumerate(matches):
+        radio_id = int(match.group(1))
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(section)
+        block = section[start:end]
+
+        table_match = re.search(r"Noisefloor table:\s*(.*?)\s*Scan table:", block, re.DOTALL)
+        if not table_match:
+            continue
+        table_block = table_match.group(1)
+        for line in table_block.splitlines():
+            row_match = re.search(
+                r"\[\s*\d+\]:\s*(\d+)\s*MHz\s*\(\s*(\d+)\)\s+(-?\d+)\s+(-?\d+)",
+                line,
+            )
+            if not row_match:
+                continue
+            frequency = int(row_match.group(1))
+            channel = int(row_match.group(2))
+            noise_floor = int(row_match.group(3))
+            load = int(row_match.group(4))
+            band = "2,4 GHz" if frequency < 3000 else "5 GHz"
+            entries.append(
+                WifiNoiseFloorEntry(
+                    radio_id=radio_id,
+                    frequency_mhz=frequency,
+                    channel=channel,
+                    noise_floor=noise_floor,
+                    load=load,
+                    band=band,
+                )
+            )
+    return entries
 
 
 def extract_value(block: str, key: str) -> Optional[str]:
@@ -1187,6 +1240,57 @@ def render_wlan_scan(networks: List[WifiNetwork]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+def render_wlan_noisefloor(entries: List[WifiNoiseFloorEntry]) -> None:
+    st.subheader("WLAN Noisefloor/Load")
+    if not entries:
+        st.info("Keine Noisefloor-Daten gefunden.")
+        return
+
+    df = pd.DataFrame([entry.__dict__ for entry in entries])
+    df = df.sort_values(["band", "frequency_mhz"])
+
+    for band in ["5 GHz", "2,4 GHz"]:
+        band_df = df[df["band"] == band]
+        if band_df.empty:
+            continue
+        st.markdown(f"**{band}**")
+        st.dataframe(
+            band_df[["frequency_mhz", "channel", "noise_floor", "load", "radio_id"]]
+            .rename(
+                columns={
+                    "frequency_mhz": "Frequency (MHz)",
+                    "channel": "Channel",
+                    "noise_floor": "Noise Floor",
+                    "load": "Load",
+                    "radio_id": "Radio",
+                }
+            ),
+            use_container_width=True,
+        )
+
+    melted = df.melt(
+        id_vars=["frequency_mhz", "band"],
+        value_vars=["noise_floor", "load"],
+        var_name="Metrik",
+        value_name="Wert",
+    )
+    melted["Metrik"] = melted["Metrik"].map(
+        {"noise_floor": "Noise Floor", "load": "Load"}
+    )
+    fig = px.line(
+        melted,
+        x="frequency_mhz",
+        y="Wert",
+        color="Metrik",
+        facet_row="band",
+        markers=True,
+        labels={"frequency_mhz": "Frequency (MHz)"},
+        title="Noisefloor und Load pro Frequenz",
+    )
+    fig.for_each_annotation(lambda annotation: annotation.update(text=annotation.text.split("=")[-1]))
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_wlan_clients(stations: List[WifiStation]) -> None:
     st.subheader("WLAN Clients")
     if not stations:
@@ -1435,6 +1539,7 @@ def build_dashboard(text: str) -> None:
     networks = parse_wlan_env_scan(text)
     stations = parse_wlan_stations(text)
     radio_loads = parse_wlan_radio_load(text)
+    noisefloor_entries = parse_wlan_noisefloor(text)
     ports = parse_lan_ports(text)
     voip_accounts = parse_voip_accounts(text)
     neighbour_clients = parse_neighbour_clients(text)
@@ -1462,6 +1567,7 @@ def build_dashboard(text: str) -> None:
 
     with tab_wlan:
         render_wlan_scan(networks)
+        render_wlan_noisefloor(noisefloor_entries)
         render_wlan_clients(stations)
         render_wlan_radio_load(radio_loads)
 
