@@ -39,6 +39,35 @@ class LanPort:
     speed: Optional[str]
 
 
+@dataclass
+class TelephonyAccount:
+    index: int
+    number: str
+    provider: str
+    transport: str
+    port: Optional[int]
+    sip_interface: str
+    registered: bool
+    reachability: Optional[int]
+    cipher: Optional[str] = None
+    rx_bytes: Optional[int] = None
+    rx_pkts: Optional[int] = None
+    tx_bytes: Optional[int] = None
+    tx_pkts: Optional[int] = None
+    lost_pkts: Optional[int] = None
+    outgoing_attempted: Optional[int] = None
+    outgoing_answered: Optional[int] = None
+    outgoing_connected: Optional[int] = None
+    outgoing_failed: Optional[int] = None
+    incoming_received: Optional[int] = None
+    incoming_answered: Optional[int] = None
+    incoming_connected: Optional[int] = None
+    incoming_failed: Optional[int] = None
+    dropped_calls: Optional[int] = None
+    total_call_time: Optional[str] = None
+    loopback_connected: Optional[int] = None
+    loopback_failed: Optional[int] = None
+
 def extract_section(text: str, start_marker: str, end_marker: str) -> str:
     pattern = re.compile(
         rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
@@ -220,6 +249,103 @@ def parse_dsl_metrics(text: str) -> dict:
     }
 
 
+def parse_voip_accounts(text: str) -> List[TelephonyAccount]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION voip Voice over IP")
+    if not section:
+        return []
+
+    accounts: dict[int, TelephonyAccount] = {}
+    header_pattern = re.compile(
+        r"ua(?P<idx>\d+)\s+\((?P<number>[^@]+)@(?P<domain>[^,]+),\s*"
+        r"(?P<transport>[^,]+),\s*port=(?P<port>\d+),\s*sipiface=(?P<sipiface>[^\)]+)\):\s*"
+        r"(?P<status>.*?)(?:--\s*reachability\s*(?P<reachability>\d+)\s*%)?",
+        re.IGNORECASE,
+    )
+
+    for line in section.splitlines():
+        header_match = header_pattern.search(line)
+        if header_match:
+            idx = int(header_match.group("idx"))
+            accounts[idx] = TelephonyAccount(
+                index=idx,
+                number=header_match.group("number"),
+                provider=header_match.group("domain"),
+                transport=header_match.group("transport"),
+                port=int(header_match.group("port")),
+                sip_interface=header_match.group("sipiface"),
+                registered="registered ok" in header_match.group("status").lower(),
+                reachability=int(header_match.group("reachability"))
+                if header_match.group("reachability")
+                else None,
+            )
+            continue
+
+        stat_match = re.match(r"\s*(\d+):\s*(.*)", line)
+        if not stat_match:
+            continue
+        idx = int(stat_match.group(1))
+        payload = stat_match.group(2).strip()
+        account = accounts.get(idx)
+        if not account:
+            continue
+
+        cipher_match = re.match(r"Cipher:\s*(.*)", payload)
+        if cipher_match:
+            account.cipher = cipher_match.group(1).strip()
+            continue
+
+        traffic_match = re.match(
+            r"RX:\s*(\d+)\s*bytes,\s*(\d+)\s*pkts,\s*TX:\s*(\d+)\s*bytes,\s*(\d+)\s*pkts,\s*"
+            r"Lost packets:\s*(\d+)",
+            payload,
+        )
+        if traffic_match:
+            account.rx_bytes = int(traffic_match.group(1))
+            account.rx_pkts = int(traffic_match.group(2))
+            account.tx_bytes = int(traffic_match.group(3))
+            account.tx_pkts = int(traffic_match.group(4))
+            account.lost_pkts = int(traffic_match.group(5))
+            continue
+
+        outgoing_match = re.match(
+            r"Outgoing Calls:\s*(\d+)\s*attempted,\s*(\d+)\s*answered,\s*(\d+)\s*connected,\s*(\d+)\s*failed",
+            payload,
+        )
+        if outgoing_match:
+            account.outgoing_attempted = int(outgoing_match.group(1))
+            account.outgoing_answered = int(outgoing_match.group(2))
+            account.outgoing_connected = int(outgoing_match.group(3))
+            account.outgoing_failed = int(outgoing_match.group(4))
+            continue
+
+        incoming_match = re.match(
+            r"Incoming Calls:\s*(\d+)\s*received,\s*(\d+)\s*answered,\s*(\d+)\s*connected,\s*(\d+)\s*failed",
+            payload,
+        )
+        if incoming_match:
+            account.incoming_received = int(incoming_match.group(1))
+            account.incoming_answered = int(incoming_match.group(2))
+            account.incoming_connected = int(incoming_match.group(3))
+            account.incoming_failed = int(incoming_match.group(4))
+            continue
+
+        overall_match = re.match(
+            r"Overall Calls:\s*(\d+)\s*dropped,\s*Total Call Time\s*=\s*([0-9:]+)",
+            payload,
+        )
+        if overall_match:
+            account.dropped_calls = int(overall_match.group(1))
+            account.total_call_time = overall_match.group(2)
+            continue
+
+        loopback_match = re.match(r"Direct Loopback:\s*(\d+)\s*connected,\s*(\d+)\s*failed", payload)
+        if loopback_match:
+            account.loopback_connected = int(loopback_match.group(1))
+            account.loopback_failed = int(loopback_match.group(2))
+
+    return list(accounts.values())
+
+
 def connection_quality_label(rssi: int, quality: int) -> str:
     if rssi != 0:
         if rssi >= -55:
@@ -311,6 +437,19 @@ def format_meters(value: Optional[int]) -> str:
         return "k.A."
     return f"{value} m"
 
+
+def format_bytes(value: Optional[int]) -> str:
+    if value is None:
+        return "k.A."
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f} MB"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f} KB"
+    return f"{value} B"
+
+
+def format_bool(value: bool) -> str:
+    return "Ja" if value else "Nein"
 
 def assess_line_quality(metrics: dict) -> str:
     ds_margin = metrics.get("ds_margin_db")
@@ -443,27 +582,124 @@ def render_lan_ports(ports: List[LanPort]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+def render_telephony(accounts: List[TelephonyAccount]) -> None:
+    st.subheader("Telefonie (VoIP)")
+    if not accounts:
+        st.info("Keine VoIP-Registrierungen gefunden.")
+        return
+
+    summary_rows = []
+    for account in accounts:
+        encrypted = account.transport.lower().startswith("tls") or bool(account.cipher)
+        encryption_label = "Ja"
+        if account.transport:
+            encryption_label = f"Ja ({account.transport})" if encrypted else f"Nein ({account.transport})"
+        summary_rows.append(
+            {
+                "Anbieter": account.provider,
+                "Rufnummer": account.number,
+                "Registriert": format_bool(account.registered),
+                "Verschlüsselung": encryption_label,
+                "SIP-Interface": account.sip_interface,
+                "Port": account.port,
+                "Erreichbarkeit %": account.reachability,
+            }
+        )
+
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+
+    for account in accounts:
+        encrypted = account.transport.lower().startswith("tls") or bool(account.cipher)
+        title = f"{account.number} ({account.provider})"
+        with st.expander(title):
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Registriert", format_bool(account.registered))
+            col1.metric("Verschlüsselung", "Ja" if encrypted else "Nein")
+            col1.metric("Cipher", account.cipher or "k.A.")
+
+            col2.metric("RX", format_bytes(account.rx_bytes))
+            col2.metric("TX", format_bytes(account.tx_bytes))
+            col2.metric("Verlorene Pakete", format_count(account.lost_pkts))
+
+            col3.metric("RX Pakete", format_count(account.rx_pkts))
+            col3.metric("TX Pakete", format_count(account.tx_pkts))
+            col3.metric("Call Time", account.total_call_time or "k.A.")
+
+            call_rows = []
+            if account.outgoing_attempted is not None:
+                call_rows.append(
+                    {
+                        "Richtung": "Ausgehend",
+                        "Versucht": account.outgoing_attempted,
+                        "Angenommen": account.outgoing_answered,
+                        "Verbunden": account.outgoing_connected,
+                        "Fehlgeschlagen": account.outgoing_failed,
+                    }
+                )
+            if account.incoming_received is not None:
+                call_rows.append(
+                    {
+                        "Richtung": "Eingehend",
+                        "Versucht": account.incoming_received,
+                        "Angenommen": account.incoming_answered,
+                        "Verbunden": account.incoming_connected,
+                        "Fehlgeschlagen": account.incoming_failed,
+                    }
+                )
+            if call_rows:
+                call_df = pd.DataFrame(call_rows)
+                st.dataframe(call_df, use_container_width=True)
+                chart_df = call_df.melt(id_vars=["Richtung"], value_vars=["Versucht", "Angenommen", "Verbunden", "Fehlgeschlagen"])
+                fig = px.bar(
+                    chart_df,
+                    x="Richtung",
+                    y="value",
+                    color="variable",
+                    barmode="group",
+                    title="Call-Übersicht",
+                    labels={"value": "Anzahl"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            if account.dropped_calls is not None:
+                st.metric("Dropped Calls", format_count(account.dropped_calls))
+            if account.loopback_connected is not None:
+                st.metric(
+                    "Direct Loopback (connected/failed)",
+                    f"{format_count(account.loopback_connected)} / {format_count(account.loopback_failed)}",
+                )
+
+
 def build_dashboard(text: str) -> None:
     st.header("Support-Data-Visualisierung")
-    st.caption("Fokus auf DSL-Spektrum, WLAN-Umgebung, WLAN-Clients und LAN-Status.")
+    st.caption("Fokus auf DSL, WLAN, Telefonie und LAN-Status.")
 
     dsl_data = parse_dsl_snr(text)
     dsl_metrics = parse_dsl_metrics(text)
     networks = parse_wlan_env_scan(text)
     stations = parse_wlan_stations(text)
     ports = parse_lan_ports(text)
+    voip_accounts = parse_voip_accounts(text)
 
-    render_dsl_charts(dsl_data)
-    render_dsl_metrics(dsl_metrics)
-    render_wlan_scan(networks)
-    render_wlan_clients(stations)
-    render_lan_ports(ports)
+    tab_dsl, tab_wlan, tab_phone, tab_lan = st.tabs(["DSL", "WLAN", "Telefonie", "LAN"])
+    with tab_dsl:
+        render_dsl_charts(dsl_data)
+        render_dsl_metrics(dsl_metrics)
 
-    st.subheader("LAN Clients")
-    st.info(
-        "In der hochgeladenen Datei wurde keine explizite LAN-Clientliste gefunden. "
-        "Wenn eine Hosts-Liste oder ein Mesh-Export vorhanden ist, wird dieser Bereich automatisch gefüllt."
-    )
+    with tab_wlan:
+        render_wlan_scan(networks)
+        render_wlan_clients(stations)
+
+    with tab_phone:
+        render_telephony(voip_accounts)
+
+    with tab_lan:
+        render_lan_ports(ports)
+        st.subheader("LAN Clients")
+        st.info(
+            "In der hochgeladenen Datei wurde keine explizite LAN-Clientliste gefunden. "
+            "Wenn eine Hosts-Liste oder ein Mesh-Export vorhanden ist, wird dieser Bereich automatisch gefüllt."
+        )
 
 
 def _is_running_with_streamlit() -> bool:
