@@ -254,11 +254,21 @@ def parse_voip_accounts(text: str) -> List[TelephonyAccount]:
     if not section:
         return []
 
+    def parse_registration_status(status: str) -> bool:
+        normalized = status.strip().lower()
+        if not normalized:
+            return False
+        if "not registered" in normalized or "unregistered" in normalized:
+            return False
+        if "register failed" in normalized or "registration failed" in normalized:
+            return False
+        return "registered" in normalized or "registration ok" in normalized
+
     accounts: dict[int, TelephonyAccount] = {}
     header_pattern = re.compile(
         r"ua(?P<idx>\d+)\s+\((?P<number>[^@]+)@(?P<domain>[^,]+),\s*"
         r"(?P<transport>[^,]+),\s*port=(?P<port>\d+),\s*sipiface=(?P<sipiface>[^\)]+)\):\s*"
-        r"(?P<status>.*?)(?:--\s*reachability\s*(?P<reachability>\d+)\s*%)?",
+        r"(?P<status>.*?)(?:\s*--\s*reachability\s*(?P<reachability>\d+)\s*%\s*(?:\([^)]+\))?)?\s*$",
         re.IGNORECASE,
     )
 
@@ -273,7 +283,7 @@ def parse_voip_accounts(text: str) -> List[TelephonyAccount]:
                 transport=header_match.group("transport"),
                 port=int(header_match.group("port")),
                 sip_interface=header_match.group("sipiface"),
-                registered="registered ok" in header_match.group("status").lower(),
+                registered=parse_registration_status(header_match.group("status")),
                 reachability=int(header_match.group("reachability"))
                 if header_match.group("reachability")
                 else None,
