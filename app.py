@@ -1540,11 +1540,17 @@ def build_dashboard(text: str) -> None:
     neighbour_clients = parse_neighbour_clients(text)
     events = parse_events(text)
 
-    st.subheader("MAC-Adresse des Geräts")
-    if device_mac:
-        st.code(device_mac, language=None)
-    else:
-        st.info("Keine MAC-Adresse gefunden.")
+    mac_label = "MAC-Adresse"
+    mac_value = device_mac or "Keine MAC-Adresse gefunden"
+    st.markdown(
+        f"""
+        <div class="mac-address-card" aria-label="{mac_label}">
+            <div class="mac-address-title">{mac_label}</div>
+            <div class="mac-address-value">{mac_value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     tab_dsl, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
         [access_technology, "LAN", "WLAN", "Telefonie", "Events"]
@@ -1579,6 +1585,49 @@ def _is_running_with_streamlit() -> bool:
 
 def main() -> None:
     st.set_page_config(page_title="Support-Data-View", layout="wide")
+    st.markdown(
+        """
+        <style>
+            .mac-address-card {
+                position: fixed;
+                top: 0.75rem;
+                right: 1.25rem;
+                z-index: 1000;
+                padding: 0.6rem 0.9rem;
+                border-radius: 0.6rem;
+                background: var(--secondary-background-color);
+                color: var(--text-color);
+                border: 1px solid rgba(120, 120, 120, 0.25);
+                box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+                max-width: 240px;
+                min-width: 180px;
+            }
+            .mac-address-title {
+                font-size: 0.7rem;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                opacity: 0.7;
+                margin-bottom: 0.25rem;
+            }
+            .mac-address-value {
+                font-weight: 600;
+                font-size: 0.95rem;
+                word-break: break-all;
+            }
+            [data-testid="stDeployButton"] {
+                display: none;
+            }
+            @media (max-width: 768px) {
+                .mac-address-card {
+                    right: 0.75rem;
+                    left: 0.75rem;
+                    max-width: none;
+                }
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.title("Support-Data-View")
     st.markdown(
         "Lade eine Support-Data TXT hoch (z. B. von einer FRITZ!Box), "
