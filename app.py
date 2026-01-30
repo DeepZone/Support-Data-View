@@ -1,4 +1,6 @@
+import base64
 import re
+import zlib
 from dataclasses import dataclass
 import sys
 import textwrap
@@ -37,6 +39,16 @@ class LanPort:
     port: str
     status: str
     speed: Optional[str]
+
+
+@dataclass
+class WifiRadioLoad:
+    radio_id: int
+    offset: int
+    interval: int
+    count: int
+    dataframe: pd.DataFrame
+    error: Optional[str] = None
 
 
 @dataclass
@@ -157,6 +169,71 @@ def parse_wlan_stations(text: str) -> List[WifiStation]:
             )
         )
     return stations
+
+
+def parse_wlan_radio_load(text: str) -> List[WifiRadioLoad]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION WLAN_SCAN_RADIO_LOAD WLAN radio load")
+    if not section:
+        return []
+
+    radio_pattern = re.compile(
+        r"Radio:\s*(?P<radio>\d+)\s*\[offset=(?P<offset>-?\d+),interval=(?P<interval>\d+),count=(?P<count>\d+)\]\s*"
+        r"<<<<<BASE64:BEGIN>>>>>(?P<data>.*?)<<<<<BASE64:END>>>>>",
+        re.DOTALL,
+    )
+    radio_loads = []
+    for match in radio_pattern.finditer(section):
+        radio_id = int(match.group("radio"))
+        offset = int(match.group("offset"))
+        interval = int(match.group("interval"))
+        count = int(match.group("count"))
+        encoded = re.sub(r"\s+", "", match.group("data"))
+        try:
+            raw = base64.b64decode(encoded)
+            decoded = zlib.decompress(raw).decode("utf-8", errors="ignore")
+        except (ValueError, zlib.error) as exc:
+            radio_loads.append(
+                WifiRadioLoad(
+                    radio_id=radio_id,
+                    offset=offset,
+                    interval=interval,
+                    count=count,
+                    dataframe=pd.DataFrame(),
+                    error=f"Dekodierung fehlgeschlagen ({exc}).",
+                )
+            )
+            continue
+
+        rows = []
+        for idx, entry in enumerate(decoded.strip().split(";")):
+            if not entry:
+                continue
+            parts = entry.split(",")
+            if len(parts) != 2:
+                continue
+            global_usage = parse_int(parts[0])
+            own_tx_usage = parse_int(parts[1])
+            if global_usage is None or own_tx_usage is None:
+                continue
+            rows.append(
+                {
+                    "Sekunde": offset + idx * interval,
+                    "Global Usage (%)": global_usage,
+                    "Own TX Usage (%)": own_tx_usage,
+                }
+            )
+            if count and len(rows) >= count:
+                break
+        radio_loads.append(
+            WifiRadioLoad(
+                radio_id=radio_id,
+                offset=offset,
+                interval=interval,
+                count=count,
+                dataframe=pd.DataFrame(rows),
+            )
+        )
+    return radio_loads
 
 
 def extract_value(block: str, key: str) -> Optional[str]:
@@ -1162,6 +1239,38 @@ def render_wlan_clients(stations: List[WifiStation]) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
 
+def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
+    st.subheader("WLAN Radio Load")
+    if not radio_loads:
+        st.info("Keine WLAN-Radio-Load-Daten gefunden.")
+        return
+
+    for radio in radio_loads:
+        with st.expander(f"Radio {radio.radio_id}"):
+            if radio.error:
+                st.warning(radio.error)
+                continue
+            if radio.dataframe.empty:
+                st.info("Keine verwertbaren Radio-Load-Daten.")
+                continue
+
+            df = radio.dataframe
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Samples", f"{len(df):,}".replace(",", "."))
+            col2.metric("Ø Global Usage", f"{df['Global Usage (%)'].mean():.1f}%")
+            col3.metric("Ø Own TX Usage", f"{df['Own TX Usage (%)'].mean():.1f}%")
+
+            fig = px.line(
+                df,
+                x="Sekunde",
+                y=["Global Usage (%)", "Own TX Usage (%)"],
+                labels={"value": "Auslastung (%)", "variable": "Serie"},
+                title="Auslastung über Zeit",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(df.tail(20), use_container_width=True)
+
+
 def render_lan_ports(ports: List[LanPort]) -> None:
     st.subheader("LAN/WAN Ports")
     if not ports:
@@ -1325,6 +1434,7 @@ def build_dashboard(text: str) -> None:
     docsis_data = parse_docsis_channels(text)
     networks = parse_wlan_env_scan(text)
     stations = parse_wlan_stations(text)
+    radio_loads = parse_wlan_radio_load(text)
     ports = parse_lan_ports(text)
     voip_accounts = parse_voip_accounts(text)
     neighbour_clients = parse_neighbour_clients(text)
@@ -1353,6 +1463,7 @@ def build_dashboard(text: str) -> None:
     with tab_wlan:
         render_wlan_scan(networks)
         render_wlan_clients(stations)
+        render_wlan_radio_load(radio_loads)
 
     with tab_phone:
         render_telephony(voip_accounts)
