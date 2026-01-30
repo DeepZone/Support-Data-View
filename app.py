@@ -64,6 +64,8 @@ class WifiNoiseFloorEntry:
 RADIO_BAND_LABELS = {
     101: "2,4 GHz",
     102: "5 GHz",
+    111: "5 GHz",
+    121: "6 GHz",
 }
 
 
@@ -288,7 +290,12 @@ def parse_wlan_noisefloor(text: str) -> List[WifiNoiseFloorEntry]:
             channel = int(row_match.group(2))
             noise_floor = int(row_match.group(3))
             load = int(row_match.group(4))
-            band = "2,4 GHz" if frequency < 3000 else "5 GHz"
+            if frequency < 3000:
+                band = "2,4 GHz"
+            elif frequency >= 5925:
+                band = "6 GHz"
+            else:
+                band = "5 GHz"
             entries.append(
                 WifiNoiseFloorEntry(
                     radio_id=radio_id,
@@ -1262,25 +1269,6 @@ def render_wlan_noisefloor(entries: List[WifiNoiseFloorEntry]) -> None:
     df = pd.DataFrame([entry.__dict__ for entry in entries])
     df = df.sort_values(["band", "frequency_mhz"])
 
-    for band in ["5 GHz", "2,4 GHz"]:
-        band_df = df[df["band"] == band]
-        if band_df.empty:
-            continue
-        st.markdown(f"**{band}**")
-        st.dataframe(
-            band_df[["frequency_mhz", "channel", "noise_floor", "load", "radio_id"]]
-            .rename(
-                columns={
-                    "frequency_mhz": "Frequency (MHz)",
-                    "channel": "Channel",
-                    "noise_floor": "Noise Floor",
-                    "load": "Load",
-                    "radio_id": "Radio",
-                }
-            ),
-            use_container_width=True,
-        )
-
     melted = df.melt(
         id_vars=["frequency_mhz", "band"],
         value_vars=["noise_floor", "load"],
@@ -1372,11 +1360,6 @@ def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
                 continue
 
             df = radio.dataframe
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Samples", f"{len(df):,}".replace(",", "."))
-            col2.metric("Ø Global Usage", f"{df['Global Usage (%)'].mean():.1f}%")
-            col3.metric("Ø Own TX Usage", f"{df['Own TX Usage (%)'].mean():.1f}%")
-
             fig = px.line(
                 df,
                 x="Sekunde",
@@ -1385,7 +1368,6 @@ def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
                 title="Auslastung über Zeit",
             )
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(df.tail(20), use_container_width=True)
 
 
 def render_lan_ports(ports: List[LanPort]) -> None:
