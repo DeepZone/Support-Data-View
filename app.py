@@ -331,11 +331,44 @@ def parse_fritz_model(text: str) -> Optional[str]:
     return match.group(1).strip().strip("'")
 
 
-def parse_fritz_uptime(text: str) -> Optional[str]:
+def parse_fritz_uptime_line(text: str) -> Optional[str]:
     match = re.search(r"^uptime:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
     if not match:
         return None
     return match.group(1).strip()
+
+
+def parse_fritz_uptime_days_minutes(text: str) -> Optional[str]:
+    uptime_line = parse_fritz_uptime_line(text)
+    if not uptime_line:
+        return None
+    days_match = re.search(r"(\d+)\s+days?", uptime_line, re.IGNORECASE)
+    minutes_match = re.search(r"(\d+)\s+min", uptime_line, re.IGNORECASE)
+    if not days_match and not minutes_match:
+        return None
+    parts = []
+    if days_match:
+        days = int(days_match.group(1))
+        day_label = "Tag" if days == 1 else "Tage"
+        parts.append(f"{days} {day_label}")
+    if minutes_match:
+        minutes = int(minutes_match.group(1))
+        parts.append(f"{minutes} Min")
+    return ", ".join(parts)
+
+
+def parse_fritz_load_average(text: str) -> Optional[List[str]]:
+    uptime_line = parse_fritz_uptime_line(text)
+    if not uptime_line:
+        return None
+    match = re.search(
+        r"load average:\s*([0-9.]+),\s*([0-9.]+),\s*([0-9.]+)",
+        uptime_line,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return [match.group(1), match.group(2), match.group(3)]
 
 
 def parse_fritz_firmware_version(text: str) -> Optional[str]:
@@ -1557,13 +1590,21 @@ def render_events(events: List[EventEntry]) -> None:
 def build_dashboard(text: str) -> None:
     fritz_model = parse_fritz_model(text) or "Unbekannt"
     firmware_version = parse_fritz_firmware_version(text) or "Unbekannt"
-    uptime = parse_fritz_uptime(text) or "Unbekannt"
+    uptime = parse_fritz_uptime_days_minutes(text) or "Unbekannt"
+    load_average = parse_fritz_load_average(text)
 
     st.subheader("FRITZ!Box Informationen")
     info_columns = st.columns(3)
     info_columns[0].metric("Modell", fritz_model)
     info_columns[1].metric("Firmwareversion", firmware_version)
-    info_columns[2].metric("Uptime", uptime)
+    info_columns[2].metric("Uptime (Tage/Min)", uptime)
+
+    if load_average:
+        st.subheader("Load Average")
+        load_columns = st.columns(3)
+        load_labels = ["1 Min", "5 Min", "15 Min"]
+        for column, label, value in zip(load_columns, load_labels, load_average):
+            column.metric(label, value)
 
     access_technology = detect_access_technology(text)
     device_mac = extract_device_mac(text)
