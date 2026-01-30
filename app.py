@@ -61,6 +61,12 @@ class WifiNoiseFloorEntry:
     band: str
 
 
+RADIO_BAND_LABELS = {
+    101: "2,4 GHz",
+    102: "5 GHz",
+}
+
+
 @dataclass
 class TelephonyAccount:
     index: int
@@ -108,6 +114,13 @@ class EventEntry:
     date: str
     time: str
     message: str
+
+
+def format_radio_label(radio_id: int) -> str:
+    band = RADIO_BAND_LABELS.get(radio_id)
+    if band:
+        return f"Radio {radio_id} ({band})"
+    return f"Radio {radio_id}"
 
 def extract_section(text: str, start_marker: str, end_marker: str) -> str:
     pattern = re.compile(
@@ -1350,7 +1363,7 @@ def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
         return
 
     for radio in radio_loads:
-        with st.expander(f"Radio {radio.radio_id}"):
+        with st.expander(format_radio_label(radio.radio_id)):
             if radio.error:
                 st.warning(radio.error)
                 continue
