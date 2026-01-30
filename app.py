@@ -589,7 +589,7 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
         return
 
     summary_rows = []
-    for account in accounts:
+    for idx, account in enumerate(accounts):
         encrypted = account.transport.lower().startswith("tls") or bool(account.cipher)
         encryption_label = "Ja"
         if account.transport:
@@ -608,7 +608,7 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
 
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
 
-    for account in accounts:
+    for idx, account in enumerate(accounts):
         encrypted = account.transport.lower().startswith("tls") or bool(account.cipher)
         title = f"{account.number} ({account.provider})"
         with st.expander(title):
@@ -659,7 +659,7 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
                     title="Call-Übersicht",
                     labels={"value": "Anzahl"},
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"voip-call-chart-{idx}")
 
             if account.dropped_calls is not None:
                 st.metric("Dropped Calls", format_count(account.dropped_calls))
