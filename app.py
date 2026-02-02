@@ -472,7 +472,44 @@ def parse_events(text: str) -> List[EventEntry]:
     return entries
 
 
+def extract_training_state(section: str) -> Optional[str]:
+    if not section:
+        return None
+    match = re.search(r"^Training State:\s*(.+)$", section, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def is_showtime_state(state: Optional[str]) -> bool:
+    if not state:
+        return False
+    return "showtime" in state.lower()
+
+
 def detect_access_technology(text: str) -> str:
+    dsl_section = extract_section_by_prefix(text, "#### BEGIN SECTION DSLManager_port_1_1")
+    fiber_section = extract_section_between(
+        text,
+        "#### BEGIN SECTION FIBERManager_port_1_1",
+        "#### END SECTION FIBERManager_port_1_1",
+    )
+
+    fiber_state = extract_training_state(fiber_section)
+    dsl_state = extract_training_state(dsl_section)
+
+    fiber_rate = extract_kbits_rate(fiber_section, "Downstream Rate")
+    dsl_rate = extract_kbits_rate(dsl_section, "Downstream Rate")
+
+    fiber_active = is_showtime_state(fiber_state) or (fiber_rate is not None and fiber_rate > 0)
+    dsl_active = is_showtime_state(dsl_state) or (dsl_rate is not None and dsl_rate > 0)
+
+    if fiber_active and not dsl_active:
+        return "Fiber"
+    if dsl_active and not fiber_active:
+        return "DSL"
+    if fiber_active and dsl_active:
+        return "Fiber"
     if re.search(r"^CONFIG_FIBER=y\s*$", text, re.MULTILINE) or "FIBER Overview" in text:
         return "Fiber"
     annex_match = re.search(r"^annex\s+(.+)$", text, re.IGNORECASE | re.MULTILINE)
