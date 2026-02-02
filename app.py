@@ -1992,14 +1992,34 @@ def build_dashboard(text: str) -> None:
     parsed = parse_support_data(text)
     access_technology = parsed["access_technology"]
 
-    st.markdown('<div class="info-frame">', unsafe_allow_html=True)
-    st.subheader("FRITZ!Box Informationen")
-    info_columns = st.columns(4)
-    info_columns[0].metric("Modell", fritz_model)
-    info_columns[1].metric("Firmwareversion", firmware_version)
-    info_columns[2].metric("Uptime (Tage/Min)", uptime)
-    info_columns[3].metric("Zugang", access_technology)
-    st.markdown("</div>", unsafe_allow_html=True)
+    info_metrics = [
+        ("Modell", fritz_model),
+        ("Firmwareversion", firmware_version),
+        ("Uptime (Tage/Min)", uptime),
+        ("Zugang", access_technology),
+    ]
+    info_cards = "\n".join(
+        [
+            f"""
+            <div class="info-frame-card">
+                <div class="info-frame-label">{html.escape(label)}</div>
+                <div class="info-frame-value">{html.escape(value)}</div>
+            </div>
+            """
+            for label, value in info_metrics
+        ]
+    )
+    st.markdown(
+        f"""
+        <div class="info-frame">
+            <div class="info-frame-title">FRITZ!Box Informationen</div>
+            <div class="info-frame-grid">
+                {info_cards}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if load_average:
         st.subheader("Load Average")
@@ -2147,11 +2167,38 @@ def main() -> None:
                 margin-bottom: 1.25rem;
                 box-shadow: 0 6px 18px rgba(59, 130, 246, 0.12);
             }
-            .info-frame [data-testid="stMetric"] {
+            .info-frame-title {
+                font-size: 1.1rem;
+                font-weight: 600;
+                margin-bottom: 0.6rem;
+                color: var(--text-color);
+            }
+            .info-frame-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 0.75rem;
+            }
+            .info-frame-card {
                 background: rgba(255, 255, 255, 0.7);
                 border-radius: 0.7rem;
-                padding: 0.6rem;
+                padding: 0.6rem 0.7rem;
                 border: 1px solid rgba(59, 130, 246, 0.18);
+                min-height: 62px;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                gap: 0.25rem;
+            }
+            .info-frame-label {
+                font-size: 0.75rem;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                opacity: 0.7;
+            }
+            .info-frame-value {
+                font-size: 1rem;
+                font-weight: 600;
+                word-break: break-word;
             }
             .stTabs [data-baseweb="tab-list"] {
                 gap: 0.6rem;
@@ -2183,7 +2230,7 @@ def main() -> None:
                     border-left-color: rgba(56, 189, 248, 0.95);
                     box-shadow: 0 6px 18px rgba(14, 116, 144, 0.35);
                 }
-                .info-frame [data-testid="stMetric"] {
+                .info-frame-card {
                     background: rgba(15, 23, 42, 0.7);
                     border-color: rgba(56, 189, 248, 0.35);
                 }
