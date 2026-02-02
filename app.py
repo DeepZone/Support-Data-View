@@ -2007,25 +2007,27 @@ def build_dashboard(text: str) -> None:
             ]
         )
     info_cards = "\n".join(
-        [
-            f"""
+        textwrap.dedent(
+            f"""\
             <div class="info-frame-card">
                 <div class="info-frame-label">{html.escape(label)}</div>
                 <div class="info-frame-value">{html.escape(value)}</div>
             </div>
             """
-            for label, value in info_metrics
-        ]
+        ).strip()
+        for label, value in info_metrics
     )
     st.markdown(
-        f"""
-        <div class="info-frame">
-            <div class="info-frame-title">FRITZ!Box Informationen</div>
-            <div class="info-frame-grid">
-                {info_cards}
+        textwrap.dedent(
+            f"""\
+            <div class="info-frame">
+                <div class="info-frame-title">FRITZ!Box Informationen</div>
+                <div class="info-frame-grid">
+                    {info_cards}
+                </div>
             </div>
-        </div>
-        """,
+            """
+        ),
         unsafe_allow_html=True,
     )
 
@@ -2048,23 +2050,25 @@ def build_dashboard(text: str) -> None:
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
     mac_value_safe = html.escape(mac_value)
     st.markdown(
-        f"""
-        <div class="mac-address-card" aria-label="{mac_label}">
-            <div class="mac-address-title">{mac_label}</div>
-            <div class="mac-address-row">
-                <div class="mac-address-value" id="mac-address-value">{mac_value_safe}</div>
-                <button
-                    class="mac-address-copy"
-                    type="button"
-                    aria-label="MAC-Adresse kopieren"
-                    data-copy="{mac_value_safe}"
-                    onclick="navigator.clipboard.writeText(this.dataset.copy); this.classList.add('copied'); this.textContent='Kopiert'; setTimeout(() => {{ this.classList.remove('copied'); this.textContent='Kopieren'; }}, 1500);"
-                >
-                    Kopieren
-                </button>
+        textwrap.dedent(
+            f"""\
+            <div class="mac-address-card" aria-label="{mac_label}">
+                <div class="mac-address-title">{mac_label}</div>
+                <div class="mac-address-row">
+                    <div class="mac-address-value" id="mac-address-value">{mac_value_safe}</div>
+                    <button
+                        class="mac-address-copy"
+                        type="button"
+                        aria-label="MAC-Adresse kopieren"
+                        data-copy="{mac_value_safe}"
+                        onclick="navigator.clipboard.writeText(this.dataset.copy); this.classList.add('copied'); this.textContent='Kopiert'; setTimeout(() => {{ this.classList.remove('copied'); this.textContent='Kopieren'; }}, 1500);"
+                    >
+                        Kopieren
+                    </button>
+                </div>
             </div>
-        </div>
-        """,
+            """
+        ),
         unsafe_allow_html=True,
     )
 
@@ -2107,8 +2111,9 @@ def _is_running_with_streamlit() -> bool:
 def main() -> None:
     st.set_page_config(page_title="Support-Daten Viewer", layout="wide")
     st.markdown(
-        """
-        <style>
+        textwrap.dedent(
+            """\
+            <style>
             .mac-address-card {
                 position: fixed;
                 top: 2.5rem;
@@ -2262,8 +2267,9 @@ def main() -> None:
                     max-width: none;
                 }
             }
-        </style>
-        """,
+            </style>
+            """
+        ),
         unsafe_allow_html=True,
     )
     st.title("Support-Daten Viewer")
