@@ -730,6 +730,8 @@ def parse_fiber_overview(text: str) -> dict:
             return None
 
     return {
+        "downstream_rate_kbits": extract_kbits_rate(section, "Downstream Rate"),
+        "upstream_rate_kbits": extract_kbits_rate(section, "Upstream Rate"),
         "olt_vendor": parse_line("OLT Vendor"),
         "olt_vendor_id": parse_line("OLT Vendor ID"),
         "olt_equipment_id": parse_line("OLT Equipment ID"),
@@ -755,6 +757,17 @@ def render_fiber_dashboard(fiber_data: dict) -> None:
     if not fiber_data:
         st.info("Keine FIBER-Daten gefunden.")
         return
+
+    st.subheader("Sync")
+    sync_columns = st.columns(2)
+    sync_columns[0].metric(
+        "Downstream",
+        format_sync_rate(fiber_data.get("downstream_rate_kbits")),
+    )
+    sync_columns[1].metric(
+        "Upstream",
+        format_sync_rate(fiber_data.get("upstream_rate_kbits")),
+    )
 
     olt_columns = st.columns(2)
     olt_columns[0].metric("OLT Vendor", fiber_data.get("olt_vendor") or "k.A.")
@@ -1112,6 +1125,15 @@ def format_mbit(value_kbits: Optional[int]) -> str:
     if value_kbits is None:
         return "k.A."
     return f"{value_kbits / 1000:.1f} Mbit/s"
+
+
+def format_sync_rate(value_kbits: Optional[int]) -> str:
+    if value_kbits is None:
+        return "k.A."
+    mbit = value_kbits / 1000
+    if mbit >= 1000:
+        return f"{mbit / 1000:.1f} Gbit/s"
+    return f"{mbit:.1f} Mbit/s"
 
 
 def format_db(value: Optional[float]) -> str:
