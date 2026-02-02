@@ -1998,6 +1998,14 @@ def build_dashboard(text: str) -> None:
         ("Uptime (Tage/Min)", uptime),
         ("Zugang", access_technology),
     ]
+    if load_average:
+        load_labels = ["1 Min", "5 Min", "15 Min"]
+        info_metrics.extend(
+            [
+                (f"Load Average {label}", value)
+                for label, value in zip(load_labels, load_average)
+            ]
+        )
     info_cards = "\n".join(
         [
             f"""
@@ -2020,13 +2028,6 @@ def build_dashboard(text: str) -> None:
         """,
         unsafe_allow_html=True,
     )
-
-    if load_average:
-        st.subheader("Load Average")
-        load_columns = st.columns(3)
-        load_labels = ["1 Min", "5 Min", "15 Min"]
-        for column, label, value in zip(load_columns, load_labels, load_average):
-            column.metric(label, value)
 
     device_mac = parsed["device_mac"]
     dsl_data = parsed["dsl_data"]
