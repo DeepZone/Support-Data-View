@@ -1991,6 +1991,7 @@ def main() -> None:
                 border-radius: 999px;
                 border: 1px solid rgba(120, 120, 120, 0.3);
                 background: rgba(120, 120, 120, 0.08);
+                color: var(--text-color);
                 font-weight: 600;
                 transition: all 0.2s ease;
             }
@@ -2003,6 +2004,22 @@ def main() -> None:
             .stTabs [data-baseweb="tab"]:hover {
                 border-color: rgba(59, 130, 246, 0.45);
                 background: rgba(59, 130, 246, 0.12);
+            }
+            @media (prefers-color-scheme: dark) {
+                .stTabs [data-baseweb="tab"] {
+                    border-color: rgba(148, 163, 184, 0.6);
+                    background: rgba(148, 163, 184, 0.16);
+                    color: #e2e8f0;
+                }
+                .stTabs [aria-selected="true"] {
+                    background: linear-gradient(135deg, rgba(59, 130, 246, 0.45), rgba(14, 165, 233, 0.4));
+                    border-color: rgba(96, 165, 250, 0.8);
+                    color: #f8fafc;
+                }
+                .stTabs [data-baseweb="tab"]:hover {
+                    border-color: rgba(96, 165, 250, 0.75);
+                    background: rgba(59, 130, 246, 0.3);
+                }
             }
             [data-testid="stDeployButton"],
             [data-testid="stToolbar"],
