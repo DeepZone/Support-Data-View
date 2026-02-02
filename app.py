@@ -119,6 +119,19 @@ class EventEntry:
     message: str
 
 
+@dataclass
+class InternetConnection:
+    name: str
+    access_type: str
+    vlan: Optional[str]
+    ipv4_address: Optional[str]
+    ipv4_dns: List[str]
+    ipv4_masq: Optional[str]
+    ipv6_address: Optional[str]
+    ipv6_dns: List[str]
+    ipv6_masq: Optional[str]
+
+
 def format_radio_label(radio_id: int) -> str:
     band = RADIO_BAND_LABELS.get(radio_id)
     if band:
@@ -471,6 +484,77 @@ def parse_events(text: str) -> List[EventEntry]:
         entries.append(EventEntry(date=match.group(1), time=match.group(2), message=match.group(3)))
     return entries
 
+
+def _parse_internet_connections(section: str) -> List[str]:
+    connections = []
+    connection_pattern = re.compile(
+        r"connection\d+/\n(?P<body>.*?)(?=\nconnection\d+/|##### END SECTION|$)",
+        re.DOTALL,
+    )
+    for match in connection_pattern.finditer(section):
+        connections.append(match.group("body"))
+    return connections
+
+
+def _normalize_dns(values: List[Optional[str]]) -> List[str]:
+    cleaned = []
+    for value in values:
+        if not value:
+            continue
+        if value in {"0.0.0.0", "::", "0"}:
+            continue
+        cleaned.append(value)
+    return cleaned
+
+
+def parse_internet_connection(text: str) -> Optional[InternetConnection]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION UI connections")
+    if not section:
+        return None
+    opmode = extract_value(section, "opmode")
+    active_block = None
+    for block in _parse_internet_connections(section):
+        if extract_value(block, "is_active_internet_connection") == "1":
+            active_block = block
+            break
+    if not active_block:
+        return None
+
+    name = extract_value(active_block, "name") or "internet"
+    use_dhcp = extract_value(active_block, "use_dhcp") == "1"
+    dslencap = extract_value(active_block, "dslencap") or ""
+    access_type = "Unbekannt"
+    if "pppoe" in dslencap.lower() or (opmode and "pppoe" in opmode.lower()):
+        access_type = "PPPoE"
+    elif use_dhcp:
+        access_type = "DHCP (RBE)"
+
+    vlanencap = extract_value(active_block, "vlanencap")
+    vlanid = extract_value(active_block, "vlanid")
+    vlanprio = extract_value(active_block, "vlanprio")
+    vlan = None
+    if vlanencap and vlanencap != "vlanencap_none" and vlanid and vlanid != "0":
+        vlan_prio_label = f" (Prio {vlanprio})" if vlanprio and vlanprio != "0" else ""
+        vlan = f"{vlanid}{vlan_prio_label}"
+
+    ipv4_dns = _normalize_dns(
+        [extract_value(active_block, "ip4_first_dns"), extract_value(active_block, "ip4_second_dns")]
+    )
+    ipv6_dns = _normalize_dns(
+        [extract_value(active_block, "ip6_first_dns"), extract_value(active_block, "ip6_second_dns")]
+    )
+
+    return InternetConnection(
+        name=name,
+        access_type=access_type,
+        vlan=vlan,
+        ipv4_address=extract_value(active_block, "ip4_addr"),
+        ipv4_dns=ipv4_dns,
+        ipv4_masq=extract_value(active_block, "ip4_masqaddr"),
+        ipv6_address=extract_value(active_block, "ip6_addr"),
+        ipv6_dns=ipv6_dns,
+        ipv6_masq=extract_value(active_block, "ip6_prefix"),
+    )
 
 def extract_training_state(section: str) -> Optional[str]:
     if not section:
@@ -1841,6 +1925,34 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
                 )
 
 
+def render_internet_connection(connection: Optional[InternetConnection]) -> None:
+    st.subheader("Internet")
+    if not connection:
+        st.info("Keine Internetdaten gefunden.")
+        return
+
+    info_columns = st.columns(3)
+    info_columns[0].metric("Verbindung", connection.name)
+    info_columns[1].metric("Zugangsart", connection.access_type)
+    info_columns[2].metric("VLAN", connection.vlan or "Nicht aktiv")
+
+    rows = [
+        {
+            "IP-Version": "IPv4",
+            "IP-Adresse": connection.ipv4_address or "-",
+            "DNS": ", ".join(connection.ipv4_dns) if connection.ipv4_dns else "-",
+            "Masqadresse": connection.ipv4_masq or "-",
+        },
+        {
+            "IP-Version": "IPv6",
+            "IP-Adresse": connection.ipv6_address or "-",
+            "DNS": ", ".join(connection.ipv6_dns) if connection.ipv6_dns else "-",
+            "Masqadresse": connection.ipv6_masq or "-",
+        },
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_events(events: List[EventEntry]) -> None:
     st.subheader("Events")
     if not events:
@@ -1860,6 +1972,7 @@ def parse_support_data(text: str) -> dict:
         "dsl_metrics": parse_dsl_metrics(text),
         "docsis_data": parse_docsis_channels(text),
         "fiber_data": parse_fiber_overview(text),
+        "internet_connection": parse_internet_connection(text),
         "networks": parse_wlan_env_scan(text),
         "stations": parse_wlan_stations(text),
         "radio_loads": parse_wlan_radio_load(text),
@@ -1898,6 +2011,7 @@ def build_dashboard(text: str) -> None:
     dsl_metrics = parsed["dsl_metrics"]
     docsis_data = parsed["docsis_data"]
     fiber_data = parsed["fiber_data"]
+    internet_connection = parsed["internet_connection"]
     networks = parsed["networks"]
     stations = parsed["stations"]
     radio_loads = parsed["radio_loads"]
@@ -1931,8 +2045,8 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_dsl, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
-        [access_technology, "LAN", "WLAN", "Telefonie", "Events"]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
+        [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "Events"]
     )
     with tab_dsl:
         if access_technology == "Cable":
@@ -1942,6 +2056,9 @@ def build_dashboard(text: str) -> None:
         else:
             render_dsl_charts(dsl_data)
             render_dsl_metrics(dsl_metrics)
+
+    with tab_internet:
+        render_internet_connection(internet_connection)
 
     with tab_lan:
         render_lan_ports(ports)
