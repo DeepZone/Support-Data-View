@@ -1998,14 +1998,30 @@ def build_dashboard(text: str) -> None:
         ("Uptime (Tage/Min)", uptime),
         ("Zugang", access_technology),
     ]
+    load_section = ""
     if load_average:
         load_labels = ["1 Min", "5 Min", "15 Min"]
-        info_metrics.extend(
-            [
-                (f"Load Average {label}", value)
-                for label, value in zip(load_labels, load_average)
-            ]
+        load_cards = "\n".join(
+            textwrap.dedent(
+                f"""\
+                <div class="info-frame-load-card">
+                    <div class="info-frame-label">{html.escape(label)}</div>
+                    <div class="info-frame-value">{html.escape(value)}</div>
+                </div>
+                """
+            ).strip()
+            for label, value in zip(load_labels, load_average)
         )
+        load_section = textwrap.dedent(
+            f"""\
+            <div class="info-frame-load">
+                <div class="info-frame-load-title">Load Average</div>
+                <div class="info-frame-load-grid">
+                    {load_cards}
+                </div>
+            </div>
+            """
+        ).strip()
     info_cards = "\n".join(
         textwrap.dedent(
             f"""\
@@ -2025,6 +2041,7 @@ def build_dashboard(text: str) -> None:
                 <div class="info-frame-grid">
                     {info_cards}
                 </div>
+                {load_section}
             </div>
             """
         ),
@@ -2184,6 +2201,34 @@ def main() -> None:
                 grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                 gap: 0.75rem;
             }
+            .info-frame-load {
+                margin-top: 0.85rem;
+                padding-top: 0.75rem;
+                border-top: 1px dashed rgba(59, 130, 246, 0.35);
+            }
+            .info-frame-load-title {
+                font-size: 0.85rem;
+                font-weight: 600;
+                margin-bottom: 0.45rem;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                opacity: 0.75;
+            }
+            .info-frame-load-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                gap: 0.6rem;
+            }
+            .info-frame-load-card {
+                background: rgba(255, 255, 255, 0.65);
+                border-radius: 0.6rem;
+                padding: 0.5rem 0.6rem;
+                border: 1px solid rgba(59, 130, 246, 0.2);
+                display: flex;
+                flex-direction: column;
+                gap: 0.2rem;
+                min-height: 54px;
+            }
             .info-frame-card {
                 background: rgba(255, 255, 255, 0.7);
                 border-radius: 0.7rem;
@@ -2239,6 +2284,13 @@ def main() -> None:
                 .info-frame-card {
                     background: rgba(15, 23, 42, 0.7);
                     border-color: rgba(56, 189, 248, 0.35);
+                }
+                .info-frame-load {
+                    border-top-color: rgba(56, 189, 248, 0.5);
+                }
+                .info-frame-load-card {
+                    background: rgba(15, 23, 42, 0.7);
+                    border-color: rgba(56, 189, 248, 0.4);
                 }
                 .stTabs [data-baseweb="tab"] {
                     border-color: rgba(148, 163, 184, 0.6);
