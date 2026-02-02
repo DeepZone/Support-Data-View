@@ -473,6 +473,8 @@ def parse_events(text: str) -> List[EventEntry]:
 
 
 def detect_access_technology(text: str) -> str:
+    if re.search(r"^CONFIG_FIBER=y\s*$", text, re.MULTILINE) or "FIBER Overview" in text:
+        return "Fiber"
     annex_match = re.search(r"^annex\s+(.+)$", text, re.IGNORECASE | re.MULTILINE)
     if annex_match and "kabel" in annex_match.group(1).lower():
         return "Cable"
@@ -525,6 +527,15 @@ def extract_section_block(text: str, header: str) -> str:
     if not match:
         return ""
     return match.group(1)
+
+
+def extract_section_between(text: str, start_marker: str, end_marker: str) -> str:
+    pattern = re.compile(
+        rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
+        re.DOTALL,
+    )
+    match = pattern.search(text)
+    return match.group(1) if match else ""
 
 
 def parse_dsl_metrics(text: str) -> dict:
@@ -671,6 +682,133 @@ def parse_voip_accounts(text: str) -> List[TelephonyAccount]:
             account.loopback_failed = int(loopback_match.group(2))
 
     return list(accounts.values())
+
+
+def parse_fiber_overview(text: str) -> dict:
+    section = extract_section_between(
+        text,
+        "#### BEGIN SECTION FIBERManager_port_1_1",
+        "#### END SECTION FIBERManager_port_1_1",
+    )
+    if not section:
+        return {}
+
+    def parse_line(label: str) -> Optional[str]:
+        match = re.search(rf"^\s*{re.escape(label)}:\s*(.+)$", section, re.MULTILINE)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    vlan_rules = []
+    vlan_match = re.search(r"Vlan Rule Table:\n(.*?)(?:\nVlan Rule Translation:)", section, re.DOTALL)
+    if vlan_match:
+        for line in vlan_match.group(1).splitlines():
+            row_match = re.match(
+                r"^\s*(\d+)\s*\|\s*(\d+)\s+(\d+)\s+(\d+)\s*\|\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\|\s*(\d+)\s*\|",
+                line,
+            )
+            if not row_match:
+                continue
+            vlan_rules.append(
+                {
+                    "Regel": int(row_match.group(1)),
+                    "Outer Prio": int(row_match.group(2)),
+                    "Outer VLAN": int(row_match.group(3)),
+                    "Inner Prio": int(row_match.group(5)),
+                    "Inner VLAN": int(row_match.group(6)),
+                    "Remove Tags": int(row_match.group(9)),
+                }
+            )
+
+    def parse_scaled(label: str, divisor: float) -> Optional[float]:
+        raw_value = parse_line(label)
+        if raw_value is None:
+            return None
+        try:
+            return float(raw_value) / divisor
+        except ValueError:
+            return None
+
+    return {
+        "olt_vendor": parse_line("OLT Vendor"),
+        "olt_vendor_id": parse_line("OLT Vendor ID"),
+        "olt_equipment_id": parse_line("OLT Equipment ID"),
+        "olt_version": parse_line("OLT VersionNumber"),
+        "sfp_label": parse_line("SFP Label"),
+        "sfp_vendor": parse_line("SFP Vendor"),
+        "sfp_part_number": parse_line("SFP Part Number"),
+        "sfp_serial": parse_line("SFP Serial"),
+        "vlan_rules": vlan_rules,
+        "temperature_c": parse_scaled("Temperature (0.1 deg C)", 10),
+        "supply_voltage_v": parse_scaled("Supply Voltage (mV)", 1000),
+        "tx_bias_ma": parse_scaled("Tx Bias Current (mA)", 1),
+        "tx_optical_dbm": parse_scaled("Tx Optical Pwr (0.1 dBm)", 10),
+        "rx_optical_dbm": parse_scaled("Rx Received Pwr (0.1 dBm)", 10),
+        "apd_voltage_v": parse_scaled("APD Voltage (0.1 V)", 10),
+        "ploam_state": parse_line("Current PLOAM State"),
+        "ploam_alarm": parse_line("Emergency Alarm State"),
+    }
+
+
+def render_fiber_dashboard(fiber_data: dict) -> None:
+    st.subheader("FIBER Overview")
+    if not fiber_data:
+        st.info("Keine FIBER-Daten gefunden.")
+        return
+
+    olt_columns = st.columns(2)
+    olt_columns[0].metric("OLT Vendor", fiber_data.get("olt_vendor") or "k.A.")
+    olt_columns[0].metric("OLT Vendor ID", fiber_data.get("olt_vendor_id") or "k.A.")
+    olt_columns[1].metric("OLT Equipment ID", fiber_data.get("olt_equipment_id") or "k.A.")
+    olt_columns[1].metric("OLT Version", fiber_data.get("olt_version") or "k.A.")
+
+    st.subheader("SFP")
+    sfp_columns = st.columns(2)
+    sfp_columns[0].metric("Label", fiber_data.get("sfp_label") or "k.A.")
+    sfp_columns[0].metric("Vendor", fiber_data.get("sfp_vendor") or "k.A.")
+    sfp_columns[1].metric("Part Number", fiber_data.get("sfp_part_number") or "k.A.")
+    sfp_columns[1].metric("Serial", fiber_data.get("sfp_serial") or "k.A.")
+
+    st.subheader("VLAN Regeln")
+    vlan_rules = fiber_data.get("vlan_rules", [])
+    if vlan_rules:
+        st.dataframe(pd.DataFrame(vlan_rules), use_container_width=True)
+    else:
+        st.info("Keine VLAN-Regeln gefunden.")
+
+    st.subheader("FIBER Werte")
+    value_columns = st.columns(3)
+    value_columns[0].metric(
+        "Temperatur (°C)",
+        f"{fiber_data['temperature_c']:.1f}" if fiber_data.get("temperature_c") is not None else "k.A.",
+    )
+    value_columns[0].metric(
+        "Supply Voltage (V)",
+        f"{fiber_data['supply_voltage_v']:.3f}"
+        if fiber_data.get("supply_voltage_v") is not None
+        else "k.A.",
+    )
+    value_columns[1].metric(
+        "Tx Bias (mA)",
+        f"{fiber_data['tx_bias_ma']:.1f}" if fiber_data.get("tx_bias_ma") is not None else "k.A.",
+    )
+    value_columns[1].metric(
+        "Tx Optical (dBm)",
+        f"{fiber_data['tx_optical_dbm']:.1f}" if fiber_data.get("tx_optical_dbm") is not None else "k.A.",
+    )
+    value_columns[2].metric(
+        "Rx Optical (dBm)",
+        f"{fiber_data['rx_optical_dbm']:.1f}" if fiber_data.get("rx_optical_dbm") is not None else "k.A.",
+    )
+    value_columns[2].metric(
+        "APD Voltage (V)",
+        f"{fiber_data['apd_voltage_v']:.1f}" if fiber_data.get("apd_voltage_v") is not None else "k.A.",
+    )
+
+    st.subheader("PLOAM Status")
+    ploam_columns = st.columns(2)
+    ploam_columns[0].metric("Current PLOAM State", fiber_data.get("ploam_state") or "k.A.")
+    ploam_columns[1].metric("Emergency Alarm State", fiber_data.get("ploam_alarm") or "k.A.")
 
 
 def extract_docsis_state(text: str) -> str:
@@ -1611,6 +1749,7 @@ def build_dashboard(text: str) -> None:
     dsl_data = parse_dsl_snr(text)
     dsl_metrics = parse_dsl_metrics(text)
     docsis_data = parse_docsis_channels(text)
+    fiber_data = parse_fiber_overview(text)
     networks = parse_wlan_env_scan(text)
     stations = parse_wlan_stations(text)
     radio_loads = parse_wlan_radio_load(text)
@@ -1650,6 +1789,8 @@ def build_dashboard(text: str) -> None:
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
+        elif access_technology == "Fiber":
+            render_fiber_dashboard(fiber_data)
         else:
             render_dsl_charts(dsl_data)
             render_dsl_metrics(dsl_metrics)
