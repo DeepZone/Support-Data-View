@@ -734,7 +734,6 @@ def parse_fiber_overview(text: str) -> dict:
         "upstream_rate_kbits": extract_kbits_rate(section, "Upstream Rate"),
         "olt_vendor": parse_line("OLT Vendor"),
         "olt_vendor_id": parse_line("OLT Vendor ID"),
-        "olt_equipment_id": parse_line("OLT Equipment ID"),
         "olt_version": parse_line("OLT VersionNumber"),
         "sfp_label": parse_line("SFP Label"),
         "sfp_vendor": parse_line("SFP Vendor"),
@@ -772,7 +771,6 @@ def render_fiber_dashboard(fiber_data: dict) -> None:
     olt_columns = st.columns(2)
     olt_columns[0].metric("OLT Vendor", fiber_data.get("olt_vendor") or "k.A.")
     olt_columns[0].metric("OLT Vendor ID", fiber_data.get("olt_vendor_id") or "k.A.")
-    olt_columns[1].metric("OLT Equipment ID", fiber_data.get("olt_equipment_id") or "k.A.")
     olt_columns[1].metric("OLT Version", fiber_data.get("olt_version") or "k.A.")
 
     st.subheader("SFP")
