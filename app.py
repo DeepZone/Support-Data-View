@@ -758,27 +758,34 @@ def render_fiber_dashboard(fiber_data: dict) -> None:
         return
 
     st.subheader("Sync")
-    sync_columns = st.columns(2)
-    sync_columns[0].metric(
-        "Downstream",
-        format_sync_rate(fiber_data.get("downstream_rate_kbits")),
-    )
-    sync_columns[1].metric(
-        "Upstream",
-        format_sync_rate(fiber_data.get("upstream_rate_kbits")),
+    render_metric_rows(
+        [
+            ("Downstream", format_sync_rate(fiber_data.get("downstream_rate_kbits"))),
+            ("Upstream", format_sync_rate(fiber_data.get("upstream_rate_kbits"))),
+        ],
+        columns=2,
     )
 
-    olt_columns = st.columns(2)
-    olt_columns[0].metric("OLT Vendor", fiber_data.get("olt_vendor") or "k.A.")
-    olt_columns[0].metric("OLT Vendor ID", fiber_data.get("olt_vendor_id") or "k.A.")
-    olt_columns[1].metric("OLT Version", fiber_data.get("olt_version") or "k.A.")
+    st.subheader("OLT")
+    render_metric_rows(
+        [
+            ("OLT Vendor", fiber_data.get("olt_vendor") or "k.A."),
+            ("OLT Vendor ID", fiber_data.get("olt_vendor_id") or "k.A."),
+            ("OLT Version", fiber_data.get("olt_version") or "k.A."),
+        ],
+        columns=3,
+    )
 
     st.subheader("SFP")
-    sfp_columns = st.columns(2)
-    sfp_columns[0].metric("Label", fiber_data.get("sfp_label") or "k.A.")
-    sfp_columns[0].metric("Vendor", fiber_data.get("sfp_vendor") or "k.A.")
-    sfp_columns[1].metric("Part Number", fiber_data.get("sfp_part_number") or "k.A.")
-    sfp_columns[1].metric("Serial", fiber_data.get("sfp_serial") or "k.A.")
+    render_metric_rows(
+        [
+            ("Label", fiber_data.get("sfp_label") or "k.A."),
+            ("Vendor", fiber_data.get("sfp_vendor") or "k.A."),
+            ("Part Number", fiber_data.get("sfp_part_number") or "k.A."),
+            ("Serial", fiber_data.get("sfp_serial") or "k.A."),
+        ],
+        columns=4,
+    )
 
     st.subheader("VLAN Regeln")
     vlan_rules = fiber_data.get("vlan_rules", [])
@@ -788,38 +795,43 @@ def render_fiber_dashboard(fiber_data: dict) -> None:
         st.info("Keine VLAN-Regeln gefunden.")
 
     st.subheader("FIBER Werte")
-    value_columns = st.columns(3)
-    value_columns[0].metric(
-        "Temperatur (°C)",
-        f"{fiber_data['temperature_c']:.1f}" if fiber_data.get("temperature_c") is not None else "k.A.",
-    )
-    value_columns[0].metric(
-        "Supply Voltage (V)",
-        f"{fiber_data['supply_voltage_v']:.3f}"
-        if fiber_data.get("supply_voltage_v") is not None
-        else "k.A.",
-    )
-    value_columns[1].metric(
-        "Tx Bias (mA)",
-        f"{fiber_data['tx_bias_ma']:.1f}" if fiber_data.get("tx_bias_ma") is not None else "k.A.",
-    )
-    value_columns[1].metric(
-        "Tx Optical (dBm)",
-        f"{fiber_data['tx_optical_dbm']:.1f}" if fiber_data.get("tx_optical_dbm") is not None else "k.A.",
-    )
-    value_columns[2].metric(
-        "Rx Optical (dBm)",
-        f"{fiber_data['rx_optical_dbm']:.1f}" if fiber_data.get("rx_optical_dbm") is not None else "k.A.",
-    )
-    value_columns[2].metric(
-        "APD Voltage (V)",
-        f"{fiber_data['apd_voltage_v']:.1f}" if fiber_data.get("apd_voltage_v") is not None else "k.A.",
+    render_metric_rows(
+        [
+            (
+                "Temperatur (°C)",
+                f"{fiber_data['temperature_c']:.1f}" if fiber_data.get("temperature_c") is not None else "k.A.",
+            ),
+            (
+                "Supply Voltage (V)",
+                f"{fiber_data['supply_voltage_v']:.3f}"
+                if fiber_data.get("supply_voltage_v") is not None
+                else "k.A.",
+            ),
+            ("Tx Bias (mA)", f"{fiber_data['tx_bias_ma']:.1f}" if fiber_data.get("tx_bias_ma") is not None else "k.A."),
+            (
+                "Tx Optical (dBm)",
+                f"{fiber_data['tx_optical_dbm']:.1f}" if fiber_data.get("tx_optical_dbm") is not None else "k.A.",
+            ),
+            (
+                "Rx Optical (dBm)",
+                f"{fiber_data['rx_optical_dbm']:.1f}" if fiber_data.get("rx_optical_dbm") is not None else "k.A.",
+            ),
+            (
+                "APD Voltage (V)",
+                f"{fiber_data['apd_voltage_v']:.1f}" if fiber_data.get("apd_voltage_v") is not None else "k.A.",
+            ),
+        ],
+        columns=3,
     )
 
     st.subheader("PLOAM Status")
-    ploam_columns = st.columns(2)
-    ploam_columns[0].metric("Current PLOAM State", fiber_data.get("ploam_state") or "k.A.")
-    ploam_columns[1].metric("Emergency Alarm State", fiber_data.get("ploam_alarm") or "k.A.")
+    render_metric_rows(
+        [
+            ("Current PLOAM State", fiber_data.get("ploam_state") or "k.A."),
+            ("Emergency Alarm State", fiber_data.get("ploam_alarm") or "k.A."),
+        ],
+        columns=2,
+    )
 
 
 def extract_docsis_state(text: str) -> str:
@@ -1166,6 +1178,16 @@ def format_bool(value: bool) -> str:
     return "Ja" if value else "Nein"
 
 
+def render_metric_rows(metrics: List[tuple[str, str]], columns: int = 3) -> None:
+    if not metrics:
+        return
+    for idx in range(0, len(metrics), columns):
+        row = metrics[idx : idx + columns]
+        cols = st.columns(len(row))
+        for column, (label, value) in zip(cols, row):
+            column.metric(label, value)
+
+
 def assess_line_quality(metrics: dict) -> str:
     ds_margin = metrics.get("ds_margin_db")
     ds_attenuation = metrics.get("ds_attenuation_db")
@@ -1380,22 +1402,23 @@ def render_dsl_metrics(metrics: dict) -> None:
         st.info("Keine detaillierten DSL-Leitungswerte gefunden.")
         return
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Leitungslänge", format_meters(metrics.get("loop_length_m")))
-    col1.metric("Sync Downstream", format_mbit(metrics.get("ds_rate_kbits")))
-    col1.metric("Sync Upstream", format_mbit(metrics.get("us_rate_kbits")))
-
-    col2.metric("SNR Downstream", format_db(metrics.get("ds_margin_db")))
-    col2.metric("SNR Upstream", format_db(metrics.get("us_margin_db")))
-    col2.metric("Leitungsdämpfung DS", format_db(metrics.get("ds_attenuation_db")))
-
-    col3.metric("Leitungsdämpfung US", format_db(metrics.get("us_attenuation_db")))
-    col3.metric("FEC (DS/US)", f"{format_count(metrics.get('ds_total_fec'))} / {format_count(metrics.get('us_total_fec'))}")
-    col3.metric("CRC (DS/US)", f"{format_count(metrics.get('ds_total_crc'))} / {format_count(metrics.get('us_total_crc'))}")
-
-    st.metric("ES (DS/US)", f"{format_count(metrics.get('ds_es'))} / {format_count(metrics.get('us_es'))}")
-    st.metric("Resyncs (24h)", format_count(metrics.get("resyncs_24h")))
-    st.metric("Host triggered Retrains (24h)", format_count(metrics.get("retrains_24h")))
+    render_metric_rows(
+        [
+            ("Leitungslänge", format_meters(metrics.get("loop_length_m"))),
+            ("Sync Downstream", format_mbit(metrics.get("ds_rate_kbits"))),
+            ("Sync Upstream", format_mbit(metrics.get("us_rate_kbits"))),
+            ("SNR Downstream", format_db(metrics.get("ds_margin_db"))),
+            ("SNR Upstream", format_db(metrics.get("us_margin_db"))),
+            ("Leitungsdämpfung DS", format_db(metrics.get("ds_attenuation_db"))),
+            ("Leitungsdämpfung US", format_db(metrics.get("us_attenuation_db"))),
+            ("FEC (DS/US)", f"{format_count(metrics.get('ds_total_fec'))} / {format_count(metrics.get('us_total_fec'))}"),
+            ("CRC (DS/US)", f"{format_count(metrics.get('ds_total_crc'))} / {format_count(metrics.get('us_total_crc'))}"),
+            ("ES (DS/US)", f"{format_count(metrics.get('ds_es'))} / {format_count(metrics.get('us_es'))}"),
+            ("Resyncs (24h)", format_count(metrics.get("resyncs_24h"))),
+            ("Retrains (24h)", format_count(metrics.get("retrains_24h"))),
+        ],
+        columns=3,
+    )
 
     bridgetap_found = metrics.get("bridgetap_found")
     if bridgetap_found is True:
@@ -1416,14 +1439,30 @@ def render_cable_dashboard(docsis_data: dict) -> None:
         st.info("Keine DOCSIS-Daten gefunden.")
         return
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Operational Mode", docsis_data.get("operational_mode") or "k.A.")
-    col2.metric("Frequency Plan", docsis_data.get("frequency_plan") or "k.A.")
-    col3.metric("Modem Status", docsis_data.get("modem_status") or "k.A.")
-
     downstream = docsis_data.get("downstream_channels", [])
     ofdm = docsis_data.get("ofdm_channels", [])
     upstream = docsis_data.get("upstream_channels", [])
+
+    corr_total = sum(channel.get("CorrWords", 0) for channel in downstream) + sum(
+        channel.get("CorrWords", 0) for channel in ofdm
+    )
+    uncorr_total = sum(channel.get("UncorrWords", 0) for channel in downstream) + sum(
+        channel.get("UncorrWords", 0) for channel in ofdm
+    )
+
+    render_metric_rows(
+        [
+            ("Operational Mode", docsis_data.get("operational_mode") or "k.A."),
+            ("Frequency Plan", docsis_data.get("frequency_plan") or "k.A."),
+            ("Modem Status", docsis_data.get("modem_status") or "k.A."),
+            ("Downstream Kanäle", format_count(len(downstream))),
+            ("OFDM Kanäle", format_count(len(ofdm))),
+            ("Upstream Kanäle", format_count(len(upstream))),
+            ("CorrWords (gesamt)", format_count(corr_total)),
+            ("UncorrWords (gesamt)", format_count(uncorr_total)),
+        ],
+        columns=4,
+    )
 
     st.subheader("Downstream Kanäle (DS)")
     if downstream:
@@ -1440,15 +1479,6 @@ def render_cable_dashboard(docsis_data: dict) -> None:
         st.dataframe(pd.DataFrame(upstream), use_container_width=True)
     else:
         st.info("Keine plausiblen Upstream-Kanäle gefunden.")
-
-    corr_total = sum(channel.get("CorrWords", 0) for channel in downstream) + sum(
-        channel.get("CorrWords", 0) for channel in ofdm
-    )
-    uncorr_total = sum(channel.get("UncorrWords", 0) for channel in downstream) + sum(
-        channel.get("UncorrWords", 0) for channel in ofdm
-    )
-    st.metric("CorrWords (gesamt)", format_count(corr_total))
-    st.metric("UncorrWords (gesamt)", format_count(uncorr_total))
 
     assessment, status = assess_cable_quality(docsis_data)
     if status == "success":
@@ -1471,6 +1501,16 @@ def render_wlan_scan(networks: List[WifiNetwork]) -> None:
         return
     df = pd.DataFrame([network.__dict__ for network in networks])
     df = df.sort_values("rssi", ascending=False)
+    strongest = df.iloc[0] if not df.empty else None
+    weakest = df.iloc[-1] if not df.empty else None
+    render_metric_rows(
+        [
+            ("Netzwerke gesamt", format_count(len(df))),
+            ("Stärkstes RSSI", f"{strongest['rssi']} dBm" if strongest is not None else "k.A."),
+            ("Schwächstes RSSI", f"{weakest['rssi']} dBm" if weakest is not None else "k.A."),
+        ],
+        columns=3,
+    )
     fig = px.bar(
         df,
         x="ssid",
@@ -1541,6 +1581,15 @@ def render_wlan_clients(stations: List[WifiStation]) -> None:
     connected_df = df[df["Connect State"] > 0]
     disconnected_df = df[df["Connect State"] <= 0]
 
+    render_metric_rows(
+        [
+            ("Clients gesamt", format_count(len(df))),
+            ("Verbunden", format_count(len(connected_df))),
+            ("Nicht verbunden", format_count(len(disconnected_df))),
+        ],
+        columns=3,
+    )
+
     st.markdown("**Verbunden**")
     if connected_df.empty:
         st.info("Keine verbundenen WLAN-Clients gefunden.")
@@ -1599,6 +1648,16 @@ def render_lan_ports(ports: List[LanPort]) -> None:
         st.info("Keine LAN/WAN-Portinformationen gefunden.")
         return
     df = pd.DataFrame([port.__dict__ for port in ports])
+    up_count = len(df[df["status"] == "up"])
+    down_count = len(df[df["status"] == "down"])
+    render_metric_rows(
+        [
+            ("Ports gesamt", format_count(len(df))),
+            ("Ports aktiv", format_count(up_count)),
+            ("Ports inaktiv", format_count(down_count)),
+        ],
+        columns=3,
+    )
     fig = px.bar(
         df,
         x="port",
@@ -1634,6 +1693,15 @@ def render_lan_clients(clients: List[NeighbourClient]) -> None:
 
     connected_df = df[df["Verbunden"] == "Ja"]
     disconnected_df = df[df["Verbunden"] == "Nein"]
+
+    render_metric_rows(
+        [
+            ("Clients gesamt", format_count(len(df))),
+            ("Verbunden", format_count(len(connected_df))),
+            ("Nicht verbunden", format_count(len(disconnected_df))),
+        ],
+        columns=3,
+    )
 
     st.markdown("**Verbunden**")
     if connected_df.empty:
@@ -1745,17 +1813,41 @@ def render_events(events: List[EventEntry]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+@st.cache_data(show_spinner=False)
+def parse_support_data(text: str) -> dict:
+    access_technology = detect_access_technology(text)
+    return {
+        "access_technology": access_technology,
+        "device_mac": extract_device_mac(text),
+        "dsl_data": parse_dsl_snr(text),
+        "dsl_metrics": parse_dsl_metrics(text),
+        "docsis_data": parse_docsis_channels(text),
+        "fiber_data": parse_fiber_overview(text),
+        "networks": parse_wlan_env_scan(text),
+        "stations": parse_wlan_stations(text),
+        "radio_loads": parse_wlan_radio_load(text),
+        "noisefloor_entries": parse_wlan_noisefloor(text),
+        "ports": parse_lan_ports(text),
+        "voip_accounts": parse_voip_accounts(text),
+        "neighbour_clients": parse_neighbour_clients(text),
+        "events": parse_events(text),
+    }
+
+
 def build_dashboard(text: str) -> None:
     fritz_model = parse_fritz_model(text) or "Unbekannt"
     firmware_version = parse_fritz_firmware_version(text) or "Unbekannt"
     uptime = parse_fritz_uptime_days_minutes(text) or "Unbekannt"
     load_average = parse_fritz_load_average(text)
+    parsed = parse_support_data(text)
+    access_technology = parsed["access_technology"]
 
     st.subheader("FRITZ!Box Informationen")
-    info_columns = st.columns(3)
+    info_columns = st.columns(4)
     info_columns[0].metric("Modell", fritz_model)
     info_columns[1].metric("Firmwareversion", firmware_version)
     info_columns[2].metric("Uptime (Tage/Min)", uptime)
+    info_columns[3].metric("Zugang", access_technology)
 
     if load_average:
         st.subheader("Load Average")
@@ -1764,20 +1856,19 @@ def build_dashboard(text: str) -> None:
         for column, label, value in zip(load_columns, load_labels, load_average):
             column.metric(label, value)
 
-    access_technology = detect_access_technology(text)
-    device_mac = extract_device_mac(text)
-    dsl_data = parse_dsl_snr(text)
-    dsl_metrics = parse_dsl_metrics(text)
-    docsis_data = parse_docsis_channels(text)
-    fiber_data = parse_fiber_overview(text)
-    networks = parse_wlan_env_scan(text)
-    stations = parse_wlan_stations(text)
-    radio_loads = parse_wlan_radio_load(text)
-    noisefloor_entries = parse_wlan_noisefloor(text)
-    ports = parse_lan_ports(text)
-    voip_accounts = parse_voip_accounts(text)
-    neighbour_clients = parse_neighbour_clients(text)
-    events = parse_events(text)
+    device_mac = parsed["device_mac"]
+    dsl_data = parsed["dsl_data"]
+    dsl_metrics = parsed["dsl_metrics"]
+    docsis_data = parsed["docsis_data"]
+    fiber_data = parsed["fiber_data"]
+    networks = parsed["networks"]
+    stations = parsed["stations"]
+    radio_loads = parsed["radio_loads"]
+    noisefloor_entries = parsed["noisefloor_entries"]
+    ports = parsed["ports"]
+    voip_accounts = parsed["voip_accounts"]
+    neighbour_clients = parsed["neighbour_clients"]
+    events = parsed["events"]
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -1890,6 +1981,28 @@ def main() -> None:
             .mac-address-copy.copied {
                 background: rgba(76, 175, 80, 0.2);
                 color: #2e7d32;
+            }
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 0.6rem;
+                border-bottom: 2px solid rgba(120, 120, 120, 0.25);
+            }
+            .stTabs [data-baseweb="tab"] {
+                padding: 0.5rem 1rem;
+                border-radius: 999px;
+                border: 1px solid rgba(120, 120, 120, 0.3);
+                background: rgba(120, 120, 120, 0.08);
+                font-weight: 600;
+                transition: all 0.2s ease;
+            }
+            .stTabs [aria-selected="true"] {
+                background: linear-gradient(135deg, rgba(59, 130, 246, 0.22), rgba(14, 165, 233, 0.2));
+                border-color: rgba(59, 130, 246, 0.55);
+                color: #1f2937;
+                box-shadow: 0 6px 14px rgba(59, 130, 246, 0.2);
+            }
+            .stTabs [data-baseweb="tab"]:hover {
+                border-color: rgba(59, 130, 246, 0.45);
+                background: rgba(59, 130, 246, 0.12);
             }
             [data-testid="stDeployButton"],
             [data-testid="stToolbar"],
