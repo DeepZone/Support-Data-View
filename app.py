@@ -1992,12 +1992,14 @@ def build_dashboard(text: str) -> None:
     parsed = parse_support_data(text)
     access_technology = parsed["access_technology"]
 
+    st.markdown('<div class="info-frame">', unsafe_allow_html=True)
     st.subheader("FRITZ!Box Informationen")
     info_columns = st.columns(4)
     info_columns[0].metric("Modell", fritz_model)
     info_columns[1].metric("Firmwareversion", firmware_version)
     info_columns[2].metric("Uptime (Tage/Min)", uptime)
     info_columns[3].metric("Zugang", access_technology)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if load_average:
         st.subheader("Load Average")
@@ -2136,6 +2138,21 @@ def main() -> None:
                 background: rgba(76, 175, 80, 0.2);
                 color: #2e7d32;
             }
+            .info-frame {
+                background: rgba(59, 130, 246, 0.08);
+                border: 1px solid rgba(59, 130, 246, 0.35);
+                border-left: 6px solid rgba(59, 130, 246, 0.85);
+                border-radius: 0.85rem;
+                padding: 0.75rem 1rem 1rem;
+                margin-bottom: 1.25rem;
+                box-shadow: 0 6px 18px rgba(59, 130, 246, 0.12);
+            }
+            .info-frame [data-testid="stMetric"] {
+                background: rgba(255, 255, 255, 0.7);
+                border-radius: 0.7rem;
+                padding: 0.6rem;
+                border: 1px solid rgba(59, 130, 246, 0.18);
+            }
             .stTabs [data-baseweb="tab-list"] {
                 gap: 0.6rem;
                 border-bottom: 2px solid rgba(120, 120, 120, 0.25);
@@ -2160,6 +2177,16 @@ def main() -> None:
                 background: rgba(59, 130, 246, 0.12);
             }
             @media (prefers-color-scheme: dark) {
+                .info-frame {
+                    background: rgba(14, 116, 144, 0.3);
+                    border-color: rgba(56, 189, 248, 0.55);
+                    border-left-color: rgba(56, 189, 248, 0.95);
+                    box-shadow: 0 6px 18px rgba(14, 116, 144, 0.35);
+                }
+                .info-frame [data-testid="stMetric"] {
+                    background: rgba(15, 23, 42, 0.7);
+                    border-color: rgba(56, 189, 248, 0.35);
+                }
                 .stTabs [data-baseweb="tab"] {
                     border-color: rgba(148, 163, 184, 0.6);
                     background: rgba(148, 163, 184, 0.16);
