@@ -133,6 +133,18 @@ class InternetConnection:
 
 
 @dataclass
+class PortForwarding:
+    service: str
+    protocol: str
+    target_ip: str
+    target_port: str
+    public_ip: str
+    public_port: str
+    description: Optional[str]
+    allow_only_from: Optional[str] = None
+
+
+@dataclass
 class DectDevice:
     name: str
     hgid: Optional[int]
@@ -790,6 +802,51 @@ def parse_internet_connection(text: str) -> Optional[InternetConnection]:
         ipv6_dns=ipv6_dns,
         ipv6_masq=extract_value(active_block, "ip6_prefix"),
     )
+
+
+def parse_port_forwardings(text: str) -> List[PortForwarding]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION port_forwards IPv4 forwardings")
+    if not section:
+        return []
+
+    entries: List[PortForwarding] = []
+    current_entry: Optional[PortForwarding] = None
+    forwarding_pattern = re.compile(
+        r'^(?P<service>\S+)\s+'
+        r'(?P<protocol>TCP|UDP|IP)\s+'
+        r'(?P<target_ip>\S+)\s+'
+        r'(?P<target_port>\S+)\s+'
+        r'(?P<public_ip>\S+)\s+'
+        r'(?P<public_port>\S+)\s+'
+        r'"(?P<description>[^"]*)"\s*$',
+    )
+
+    for raw_line in section.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("##### BEGIN SECTION") or line.startswith("--- Active IPv4 Portforwardings ---"):
+            continue
+        if line.startswith("allow-only-from"):
+            if current_entry:
+                current_entry.allow_only_from = line.replace("allow-only-from", "", 1).strip()
+            continue
+
+        match = forwarding_pattern.match(line)
+        if not match:
+            continue
+
+        current_entry = PortForwarding(
+            service=match.group("service"),
+            protocol=match.group("protocol"),
+            target_ip=match.group("target_ip"),
+            target_port=match.group("target_port"),
+            public_ip=match.group("public_ip"),
+            public_port=match.group("public_port"),
+            description=match.group("description") or None,
+        )
+        entries.append(current_entry)
+    return entries
 
 def extract_training_state(section: str) -> Optional[str]:
     if not section:
@@ -2188,6 +2245,27 @@ def render_internet_connection(connection: Optional[InternetConnection]) -> None
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def render_port_forwardings(forwardings: List[PortForwarding]) -> None:
+    st.subheader("Portfreigaben (IPv4)")
+    if not forwardings:
+        st.info("Keine IPv4-Portfreigaben gefunden.")
+        return
+
+    rows = []
+    for entry in forwardings:
+        rows.append(
+            {
+                "Dienst": entry.service,
+                "Protokoll": entry.protocol,
+                "Ziel": f"{entry.target_ip}:{entry.target_port}",
+                "Öffentlich": f"{entry.public_ip}:{entry.public_port}",
+                "Bezeichnung": entry.description or "-",
+                "allow-only-from": entry.allow_only_from or "-",
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_events(events: List[EventEntry]) -> None:
     st.subheader("Events")
     if not events:
@@ -2237,6 +2315,7 @@ def parse_support_data(text: str) -> dict:
         "docsis_data": parse_docsis_channels(text),
         "fiber_data": parse_fiber_overview(text),
         "internet_connection": parse_internet_connection(text),
+        "port_forwardings": parse_port_forwardings(text),
         "networks": parse_wlan_env_scan(text),
         "stations": parse_wlan_stations(text),
         "radio_loads": parse_wlan_radio_load(text),
@@ -2320,6 +2399,7 @@ def build_dashboard(text: str) -> None:
     docsis_data = parsed["docsis_data"]
     fiber_data = parsed["fiber_data"]
     internet_connection = parsed["internet_connection"]
+    port_forwardings = parsed["port_forwardings"]
     networks = parsed["networks"]
     stations = parsed["stations"]
     radio_loads = parsed["radio_loads"]
@@ -2371,6 +2451,7 @@ def build_dashboard(text: str) -> None:
 
     with tab_internet:
         render_internet_connection(internet_connection)
+        render_port_forwardings(port_forwardings)
 
     with tab_lan:
         render_lan_ports(ports)
