@@ -597,17 +597,36 @@ def parse_dtrace_timestamp(value: str) -> Optional[datetime]:
 def parse_dtrace(text: str) -> List[DtraceEntry]:
     entries: List[DtraceEntry] = []
     level_pattern = r"(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|ERR|CRIT|CRITICAL|NOTICE)"
+    separator_pattern = r"(?:\s+-\s+|\s+)"
     patterns = [
         re.compile(
             rf"^(?P<ts>\d{{4}}-\d{{2}}-\d{{2}}[ T]\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?)\s+"
+            rf"(?:-\s+)?"
             rf"(?:\[(?P<lvl>{level_pattern})\]|(?P<lvl2>{level_pattern}))"
-            rf"\s*(?:\[(?P<comp>[^\]]+)\]|(?P<comp2>[A-Za-z0-9_.:/-]+):)?\s*(?P<msg>.*)$",
+            rf"\s*(?:\[(?P<comp>[^\]]+)\]|(?P<comp2>[A-Za-z0-9_.:/-]+):)?"
+            rf"\s*(?:-\s+)?(?P<msg>.*)$",
             re.IGNORECASE,
         ),
         re.compile(
             rf"^(?P<ts>\d{{2}}\.\d{{2}}\.\d{{4}}\s+\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?)\s+"
+            rf"(?:-\s+)?"
             rf"(?:\[(?P<lvl>{level_pattern})\]|(?P<lvl2>{level_pattern}))"
-            rf"\s*(?:\[(?P<comp>[^\]]+)\]|(?P<comp2>[A-Za-z0-9_.:/-]+):)?\s*(?P<msg>.*)$",
+            rf"\s*(?:\[(?P<comp>[^\]]+)\]|(?P<comp2>[A-Za-z0-9_.:/-]+):)?"
+            rf"\s*(?:-\s+)?(?P<msg>.*)$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"^(?P<ts>\d{{4}}-\d{{2}}-\d{{2}}[ T]\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?)"
+            rf"{separator_pattern}"
+            rf"\[(?P<lvl>{level_pattern})\s*\]\s+"
+            rf"(?P<comp>[A-Za-z0-9_.:/-]+):\s*(?P<msg>.*)$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"^(?P<ts>\d{{2}}\.\d{{2}}\.\d{{4}}\s+\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?)"
+            rf"{separator_pattern}"
+            rf"\[(?P<lvl>{level_pattern})\s*\]\s+"
+            rf"(?P<comp>[A-Za-z0-9_.:/-]+):\s*(?P<msg>.*)$",
             re.IGNORECASE,
         ),
     ]
@@ -623,7 +642,7 @@ def parse_dtrace(text: str) -> List[DtraceEntry]:
             if not match:
                 continue
             timestamp = parse_dtrace_timestamp(match.group("ts") or "")
-            level = (match.group("lvl") or match.group("lvl2") or "UNBEKANNT").upper()
+            level = (match.group("lvl") or match.group("lvl2") or "UNBEKANNT").strip().upper()
             if level == "WARNING":
                 level = "WARN"
             if level == "ERR":
@@ -2409,16 +2428,31 @@ def render_dtrace(entries: List[DtraceEntry]) -> None:
     error_count = sum(1 for entry in entries if entry.level in {"ERROR", "CRIT"})
     warn_count = sum(1 for entry in entries if entry.level == "WARN")
     unknown_count = sum(1 for entry in entries if entry.level == "UNBEKANNT")
+    criticality_score = min(100, round(((error_count * 3) + (warn_count * 1.5) + unknown_count) / max(total_entries, 1) * 20))
 
-    c1, c2, c3, c4 = st.columns(4)
+    timeline_rows = [
+        {"timestamp": entry.timestamp, "level": entry.level}
+        for entry in entries
+        if entry.timestamp is not None
+    ]
+    has_timeline = bool(timeline_rows)
+    first_seen = min((entry.timestamp for entry in entries if entry.timestamp is not None), default=None)
+    last_seen = max((entry.timestamp for entry in entries if entry.timestamp is not None), default=None)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Einträge", f"{total_entries}")
     c2.metric("Fehler (ERROR/CRIT)", f"{error_count}")
     c3.metric("Warnungen", f"{warn_count}")
     c4.metric("Unbekanntes Format", f"{unknown_count}")
+    c5.metric("Kritikalität (0-100)", f"{criticality_score}")
+
+    if first_seen and last_seen:
+        st.caption(f"Zeitraum: {first_seen:%Y-%m-%d %H:%M:%S} bis {last_seen:%Y-%m-%d %H:%M:%S}")
 
     level_df = pd.DataFrame([{"Level": entry.level} for entry in entries])
     level_count_df = level_df.value_counts("Level").reset_index(name="Anzahl")
     level_count_df = level_count_df.sort_values("Anzahl", ascending=False)
+    level_count_df["Anteil %"] = (level_count_df["Anzahl"] / total_entries * 100).round(1)
     level_fig = px.bar(
         level_count_df,
         x="Level",
@@ -2430,15 +2464,13 @@ def render_dtrace(entries: List[DtraceEntry]) -> None:
     level_fig.update_layout(showlegend=False)
     st.plotly_chart(level_fig, use_container_width=True)
 
-    timeline_rows = [
-        {"timestamp": entry.timestamp, "level": entry.level}
-        for entry in entries
-        if entry.timestamp is not None
-    ]
-    if timeline_rows:
+    if has_timeline:
         timeline_df = pd.DataFrame(timeline_rows)
         timeline_df["minute"] = timeline_df["timestamp"].dt.floor("min")
         timeline_agg = timeline_df.groupby(["minute", "level"]).size().reset_index(name="Anzahl")
+        per_minute = timeline_df.groupby("minute").size().reset_index(name="Events")
+        peak_row = per_minute.sort_values("Events", ascending=False).iloc[0]
+
         time_fig = px.line(
             timeline_agg,
             x="minute",
@@ -2448,8 +2480,28 @@ def render_dtrace(entries: List[DtraceEntry]) -> None:
             title="DTrace Ereignisse im Zeitverlauf (pro Minute)",
         )
         st.plotly_chart(time_fig, use_container_width=True)
+        st.caption(f"Peak-Last: {int(peak_row['Events'])} Events in Minute {peak_row['minute']:%Y-%m-%d %H:%M}")
     else:
         st.info("Keine Zeitstempel erkannt – Zeitverlaufsdiagramm nicht möglich.")
+
+    component_summary_df = pd.DataFrame(
+        [
+            {
+                "Komponente": entry.component or "(ohne)",
+                "Level": entry.level,
+            }
+            for entry in entries
+        ]
+    )
+    component_agg = component_summary_df.groupby(["Komponente", "Level"]).size().reset_index(name="Anzahl")
+    noisy_components = (
+        component_agg[component_agg["Level"].isin(["WARN", "ERROR", "CRIT"])]
+        .groupby("Komponente")["Anzahl"]
+        .sum()
+        .reset_index(name="Problem-Events")
+        .sort_values("Problem-Events", ascending=False)
+        .head(10)
+    )
 
     component_rows = [
         {"Komponente": entry.component or "(ohne)", "Level": entry.level}
@@ -2499,6 +2551,17 @@ def render_dtrace(entries: List[DtraceEntry]) -> None:
         )
         recurring_fig.update_layout(yaxis=dict(categoryorder="total ascending"))
         st.plotly_chart(recurring_fig, use_container_width=True)
+
+    c_left, c_right = st.columns(2)
+    with c_left:
+        st.markdown("**Level-Zusammenfassung**")
+        st.dataframe(level_count_df, use_container_width=True, hide_index=True)
+    with c_right:
+        st.markdown("**Auffällige Komponenten (WARN/ERROR/CRIT)**")
+        if noisy_components.empty:
+            st.info("Keine problematischen Komponenten erkannt.")
+        else:
+            st.dataframe(noisy_components, use_container_width=True, hide_index=True)
 
     table_df = pd.DataFrame(
         [
