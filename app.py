@@ -132,6 +132,21 @@ class InternetConnection:
     ipv6_masq: Optional[str]
 
 
+@dataclass
+class DectDevice:
+    name: str
+    hgid: Optional[int]
+    model: Optional[str]
+    ipui: Optional[str]
+    curr_codec: Optional[str]
+    ber: Optional[float]
+    rssi_values: List[float]
+    hg_ber: Optional[float]
+    hg_rssi_values: List[float]
+    no_emission: Optional[int]
+    fw_version: Optional[str]
+
+
 def format_radio_label(radio_id: int) -> str:
     band = RADIO_BAND_LABELS.get(radio_id)
     if band:
@@ -483,6 +498,78 @@ def parse_events(text: str) -> List[EventEntry]:
             continue
         entries.append(EventEntry(date=match.group(1), time=match.group(2), message=match.group(3)))
     return entries
+
+
+def parse_float(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value == "-":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def parse_dect_device_info(text: str) -> List[DectDevice]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION DECTDeviceInfo")
+    if not section:
+        return []
+
+    lines = [line.strip() for line in section.splitlines()]
+    data_lines: List[str] = []
+    for line in lines:
+        if not line or line.startswith("#####"):
+            continue
+        if line.startswith("Name,") or line.startswith("HGValid,"):
+            continue
+        if line.startswith("ULE Devices"):
+            break
+        data_lines.append(line)
+
+    devices: List[DectDevice] = []
+    for i in range(0, len(data_lines), 2):
+        first = data_lines[i]
+        second = data_lines[i + 1] if i + 1 < len(data_lines) else ""
+        values1 = [item.strip() for item in first.split(",")]
+        values2 = [item.strip() for item in second.split(",")]
+        if len(values1) < 29:
+            continue
+
+        rssi_values = [v for v in values1[28:38] if v and v != "-"]
+        hg_rssi_values = [v for v in values2[13:23] if v and v != "-"] if len(values2) >= 23 else []
+
+        devices.append(
+            DectDevice(
+                name=values1[0],
+                hgid=parse_int(values1[2]),
+                model=values1[3] or None,
+                ipui=values1[5] or None,
+                curr_codec=values1[7] or None,
+                ber=parse_float(values1[27]),
+                rssi_values=[float(v) for v in rssi_values],
+                hg_ber=parse_float(values2[12]) if len(values2) >= 13 else None,
+                hg_rssi_values=[float(v) for v in hg_rssi_values],
+                no_emission=parse_int(values2[23]) if len(values2) >= 24 else None,
+                fw_version=values2[24] if len(values2) >= 25 and values2[24] else None,
+            )
+        )
+    return devices
+
+
+def assess_dect_rssi(rssi: Optional[float]) -> str:
+    if rssi is None:
+        return "k.A."
+    if rssi >= -60:
+        return "Sehr gut"
+    if rssi >= -70:
+        return "Gut"
+    if rssi >= -80:
+        return "Mittel"
+    if rssi >= -90:
+        return "Kritisch"
+    return "Schlecht"
 
 
 def _parse_internet_connections(section: str) -> List[str]:
@@ -1962,6 +2049,35 @@ def render_events(events: List[EventEntry]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+def render_dect_devices(devices: List[DectDevice]) -> None:
+    st.subheader("DECTDeviceInfo")
+    if not devices:
+        st.info("Keine DECT-Handgeräte gefunden.")
+        return
+
+    rows = []
+    for device in devices:
+        all_rssi = device.hg_rssi_values or device.rssi_values
+        avg_rssi = sum(all_rssi) / len(all_rssi) if all_rssi else None
+        rows.append(
+            {
+                "Name": device.name,
+                "HGID": device.hgid,
+                "Model": device.model or "k.A.",
+                "IPUI": device.ipui or "k.A.",
+                "Codec": device.curr_codec or "k.A.",
+                "Ø RSSI (dBm)": round(avg_rssi, 1) if avg_rssi is not None else "k.A.",
+                "Verbindung": assess_dect_rssi(avg_rssi),
+                "FW": device.fw_version or "k.A.",
+                "NoEmission": device.no_emission if device.no_emission is not None else "k.A.",
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption("Einschätzung basiert auf durchschnittlichem RSSI: ≥-60 sehr gut, ≥-70 gut, ≥-80 mittel, ≥-90 kritisch, < -90 schlecht.")
+
+
 @st.cache_data(show_spinner=False)
 def parse_support_data(text: str) -> dict:
     access_technology = detect_access_technology(text)
@@ -1981,6 +2097,7 @@ def parse_support_data(text: str) -> dict:
         "voip_accounts": parse_voip_accounts(text),
         "neighbour_clients": parse_neighbour_clients(text),
         "events": parse_events(text),
+        "dect_devices": parse_dect_device_info(text),
     }
 
 
@@ -2062,6 +2179,7 @@ def build_dashboard(text: str) -> None:
     voip_accounts = parsed["voip_accounts"]
     neighbour_clients = parsed["neighbour_clients"]
     events = parsed["events"]
+    dect_devices = parsed["dect_devices"]
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -2089,8 +2207,8 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_events = st.tabs(
-        [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "Events"]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_dect, tab_events = st.tabs(
+        [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "DECT", "Events"]
     )
     with tab_dsl:
         if access_technology == "Cable":
@@ -2116,6 +2234,9 @@ def build_dashboard(text: str) -> None:
 
     with tab_phone:
         render_telephony(voip_accounts)
+
+    with tab_dect:
+        render_dect_devices(dect_devices)
 
     with tab_events:
         render_events(events)
