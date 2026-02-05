@@ -184,6 +184,32 @@ class DectBasisInfo:
     rfpi: Optional[str]
 
 
+@dataclass
+class Ar7Interface:
+    name: str
+    ipaddr: Optional[str]
+    netmask: Optional[str]
+    dhcp_start: Optional[str]
+    dhcp_end: Optional[str]
+
+
+@dataclass
+class Ar7NetworkSettings:
+    mode: Optional[str]
+    ipv4_mode: Optional[str]
+    ipv6_mode: Optional[str]
+    mtu: Optional[str]
+    wan_vlan: Optional[str]
+    tr069: Optional[str]
+    snmp_wan: Optional[str]
+    dyn_dns: Optional[str]
+    email_reports: Optional[str]
+    expert_mode: Optional[str]
+    hidden_menus: List[str]
+    dns_servers: List[str]
+    interfaces: Dict[str, Ar7Interface]
+
+
 DEFAULT_DECT_RSSI_INDEX_TO_DBM = {
     1: -92.7,
     2: -94.9,
@@ -1034,6 +1060,157 @@ def is_showtime_state(state: Optional[str]) -> bool:
     return "showtime" in state.lower()
 
 
+
+def _extract_ar7cfg_body(text: str) -> str:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION ar7_cfg /var/flash/ar7.cfg")
+    if not section:
+        return ""
+    start = section.find("ar7cfg {")
+    if start == -1:
+        return ""
+    brace_level = 0
+    end = None
+    for index in range(start, len(section)):
+        char = section[index]
+        if char == "{":
+            brace_level += 1
+        elif char == "}":
+            brace_level -= 1
+            if brace_level == 0:
+                end = index + 1
+                break
+    if end is None:
+        return section[start:]
+    return section[start:end]
+
+
+def _strip_quotes(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    return value.strip().rstrip(';').strip().strip('"').strip("'")
+
+
+def _format_on_off(value: Optional[str]) -> str:
+    if not value:
+        return "k.A."
+    normalized = value.strip().lower()
+    if normalized in {"yes", "on", "1", "true", "enabled"}:
+        return "Aktiviert"
+    if normalized in {"no", "off", "0", "false", "disabled"}:
+        return "Deaktiviert"
+    return value
+
+
+def _mode_label(raw_mode: Optional[str]) -> str:
+    if not raw_mode:
+        return "k.A."
+    mode = raw_mode.lower()
+    if "router" in mode:
+        return "Router"
+    if "bridge" in mode:
+        return "Bridge"
+    return raw_mode
+
+
+def _ipv4_label(raw_mode: Optional[str]) -> str:
+    mapping = {
+        "ipv4_normal": "Normal",
+        "ipv4_ds_lite": "DS-Lite",
+        "ipv4_off": "Aus",
+    }
+    return mapping.get((raw_mode or "").strip().lower(), raw_mode or "k.A.")
+
+
+def _ipv6_label(raw_mode: Optional[str]) -> str:
+    mapping = {
+        "ipv6_native": "Native",
+        "ipv6_off": "Aus",
+        "ipv6_6to4": "6to4",
+    }
+    return mapping.get((raw_mode or "").strip().lower(), raw_mode or "k.A.")
+
+
+def _find_block_value(block: str, key: str) -> Optional[str]:
+    return _strip_quotes(extract_value(block, key))
+
+
+def _extract_hidden_menus(ar7cfg_body: str) -> List[str]:
+    hidden_fields = {
+        "ipv6_hidden": "IPv6",
+        "ipv4_hidden": "IPv4",
+        "ds_lite_hidden": "DS-Lite",
+        "ipv6_native_hidden": "IPv6 Native",
+    }
+    visible = []
+    for field, label in hidden_fields.items():
+        value = _find_block_value(ar7cfg_body, field)
+        if value and value.lower() == "no":
+            visible.append(label)
+    return visible
+
+
+def parse_ar7_network_settings(text: str) -> Ar7NetworkSettings:
+    ar7cfg_body = _extract_ar7cfg_body(text)
+    if not ar7cfg_body:
+        return Ar7NetworkSettings(
+            mode=None,
+            ipv4_mode=None,
+            ipv6_mode=None,
+            mtu=None,
+            wan_vlan=None,
+            tr069=None,
+            snmp_wan=None,
+            dyn_dns=None,
+            email_reports=None,
+            expert_mode=None,
+            hidden_menus=[],
+            dns_servers=[],
+            interfaces={},
+        )
+
+    dns_servers = []
+    dns1 = _find_block_value(ar7cfg_body, "dns1")
+    dns2 = _find_block_value(ar7cfg_body, "dns2")
+    for candidate in (dns1, dns2):
+        if candidate and candidate != "0.0.0.0" and candidate not in dns_servers:
+            dns_servers.append(candidate)
+
+    interfaces: Dict[str, Ar7Interface] = {}
+    for match in re.finditer(r"(?:brinterfaces\s*)?\{(.*?)\}", ar7cfg_body, re.DOTALL):
+        block = match.group(1)
+        name = _find_block_value(block, "name")
+        ipaddr = _find_block_value(block, "ipaddr")
+        netmask = _find_block_value(block, "netmask")
+        if not name or not ipaddr or ipaddr == "0.0.0.0":
+            continue
+        interfaces[name] = Ar7Interface(
+            name=name,
+            ipaddr=ipaddr,
+            netmask=netmask,
+            dhcp_start=_find_block_value(block, "dhcpstart"),
+            dhcp_end=_find_block_value(block, "dhcpend"),
+        )
+
+    ddns_block_match = re.search(r"ddns\s*\{(.*?)\n\s*\}\s*emailnotify", ar7cfg_body, re.DOTALL)
+    ddns_block = ddns_block_match.group(1) if ddns_block_match else ""
+    email_block_match = re.search(r"emailnotify\s*\{(.*?)\n\s*\}\s*telcfg", ar7cfg_body, re.DOTALL)
+    email_block = email_block_match.group(1) if email_block_match else ""
+
+    return Ar7NetworkSettings(
+        mode=_find_block_value(ar7cfg_body, "mode"),
+        ipv4_mode=_find_block_value(ar7cfg_body, "ipv4mode"),
+        ipv6_mode=_find_block_value(ar7cfg_body, "ipv6mode"),
+        mtu=_find_block_value(ar7cfg_body, "mtu_cutback"),
+        wan_vlan=_find_block_value(ar7cfg_body, "hsi_use_wan_vlan"),
+        tr069="yes" if bool(_find_block_value(ar7cfg_body, "tr069_forwardrules")) else "no",
+        snmp_wan=_find_block_value(ar7cfg_body, "snmp_on_wan"),
+        dyn_dns=_find_block_value(ddns_block, "enabled") if ddns_block else None,
+        email_reports=_find_block_value(email_block, "enabled") if email_block else None,
+        expert_mode=_find_block_value(ar7cfg_body, "expertmode"),
+        hidden_menus=_extract_hidden_menus(ar7cfg_body),
+        dns_servers=dns_servers,
+        interfaces=interfaces,
+    )
 def detect_access_technology(text: str) -> str:
     dsl_section = extract_section_by_prefix(text, "#### BEGIN SECTION DSLManager_port_1_1")
     fiber_section = extract_section_between(
@@ -2437,6 +2614,82 @@ def render_port_forwardings(forwardings: List[PortForwarding]) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+
+def _cidr_from_netmask(netmask: Optional[str]) -> str:
+    if not netmask:
+        return ""
+    try:
+        bits = sum(bin(int(octet)).count("1") for octet in netmask.split("."))
+        return f"/{bits}"
+    except ValueError:
+        return ""
+
+
+def render_network_settings(settings: Ar7NetworkSettings) -> None:
+    st.subheader("Netzwerkeinstellungen")
+
+    lan = settings.interfaces.get("lan")
+    guest = settings.interfaces.get("guest")
+    service = settings.interfaces.get("lan:0")
+
+    def _network_line(interface: Optional[Ar7Interface], fallback: str = "k.A.") -> str:
+        if not interface or not interface.ipaddr:
+            return fallback
+        return f"{interface.ipaddr}{_cidr_from_netmask(interface.netmask)}"
+
+    dhcp_range = "k.A."
+    if lan and lan.dhcp_start and lan.dhcp_end and lan.dhcp_start != "0.0.0.0" and lan.dhcp_end != "0.0.0.0":
+        dhcp_range = f"{lan.dhcp_start} - {lan.dhcp_end}"
+
+    dns_line = ", ".join(settings.dns_servers) if settings.dns_servers else "k.A."
+    hidden_line = ", ".join(settings.hidden_menus) if settings.hidden_menus else "keine sichtbar"
+
+    st.markdown(
+        textwrap.dedent(
+            f"""            <div class="network-settings-grid">
+                <div class="network-settings-panel network-overview">
+                    <h3>Netzwerkübersicht</h3>
+                    <div class="network-card lan">
+                        <div class="network-card-header">LAN Netzwerk</div>
+                        <ul>
+                            <li>{html.escape(_network_line(lan))}</li>
+                            <li>DHCP: {html.escape(dhcp_range)}</li>
+                            <li>DNS: {html.escape(dns_line)}</li>
+                        </ul>
+                    </div>
+                    <div class="network-card guest">
+                        <div class="network-card-header">Gastnetz</div>
+                        <ul><li>{html.escape(_network_line(guest))}</li></ul>
+                    </div>
+                    <div class="network-card service">
+                        <div class="network-card-header">Servicenetz</div>
+                        <ul><li>{html.escape(_network_line(service))}</li></ul>
+                    </div>
+                </div>
+                <div class="network-settings-panel network-info">
+                    <h3>Internet &amp; WAN</h3>
+                    <ul>
+                        <li>Modus: <strong>{html.escape(_mode_label(settings.mode))}</strong></li>
+                        <li>IPv4: <strong>{html.escape(_ipv4_label(settings.ipv4_mode))}</strong></li>
+                        <li>IPv6: <strong>{html.escape(_ipv6_label(settings.ipv6_mode))}</strong></li>
+                        <li>MTU: <strong>{html.escape(settings.mtu or 'k.A.')}</strong></li>
+                        <li>WAN VLAN: <strong>{html.escape(_format_on_off(settings.wan_vlan))}</strong></li>
+                        <li>TR-069: <strong>{html.escape(_format_on_off(settings.tr069))}</strong></li>
+                        <li>SNMP auf WAN: <strong>{html.escape(_format_on_off(settings.snmp_wan))}</strong></li>
+                    </ul>
+                    <h3>Services &amp; Einstellungen</h3>
+                    <ul>
+                        <li>DynDNS: <strong>{html.escape(_format_on_off(settings.dyn_dns))}</strong></li>
+                        <li>E-Mail Reports: <strong>{html.escape(_format_on_off(settings.email_reports))}</strong></li>
+                        <li>Expertenmodus: <strong>{html.escape(_format_on_off(settings.expert_mode))}</strong></li>
+                        <li>Versteckte Menüs: <strong>{html.escape(hidden_line)}</strong></li>
+                    </ul>
+                </div>
+            </div>
+            """
+        ),
+        unsafe_allow_html=True,
+    )
 def render_events(events: List[EventEntry]) -> None:
     st.subheader("Events")
     if not events:
@@ -2709,6 +2962,7 @@ def parse_support_data(text: str) -> dict:
         "fiber_data": parse_fiber_overview(text),
         "internet_connection": parse_internet_connection(text),
         "port_forwardings": parse_port_forwardings(text),
+        "ar7_network_settings": parse_ar7_network_settings(text),
         "networks": parse_wlan_env_scan(text),
         "stations": parse_wlan_stations(text),
         "radio_loads": parse_wlan_radio_load(text),
@@ -2794,6 +3048,7 @@ def build_dashboard(text: str) -> None:
     fiber_data = parsed["fiber_data"]
     internet_connection = parsed["internet_connection"]
     port_forwardings = parsed["port_forwardings"]
+    ar7_network_settings = parsed["ar7_network_settings"]
     networks = parsed["networks"]
     stations = parsed["stations"]
     radio_loads = parsed["radio_loads"]
@@ -2832,9 +3087,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Mesh", "Telefonie", "DECT", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Netzwerkeinstellungen", "Mesh", "Telefonie", "DECT", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_mesh, tab_phone, tab_dect, tab_events = tabs[:8]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_network_settings, tab_mesh, tab_phone, tab_dect, tab_events = tabs[:9]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -2857,6 +3112,9 @@ def build_dashboard(text: str) -> None:
         render_wlan_noisefloor(noisefloor_entries)
         render_wlan_clients(stations)
         render_wlan_radio_load(radio_loads)
+
+    with tab_network_settings:
+        render_network_settings(ar7_network_settings)
 
     with tab_mesh:
         render_mesh_topology(mesh_topology)
@@ -3049,6 +3307,13 @@ def main() -> None:
                     background: rgba(148, 163, 184, 0.16);
                     color: #e2e8f0;
                 }
+                .network-settings-panel {
+                    background: rgba(15, 23, 42, 0.72);
+                    border-color: rgba(56, 189, 248, 0.35);
+                }
+                .network-card {
+                    background: rgba(15, 23, 42, 0.76);
+                }
                 .stTabs [aria-selected="true"] {
                     background: linear-gradient(135deg, rgba(59, 130, 246, 0.45), rgba(14, 165, 233, 0.4));
                     border-color: rgba(96, 165, 250, 0.8);
@@ -3059,10 +3324,59 @@ def main() -> None:
                     background: rgba(59, 130, 246, 0.3);
                 }
             }
+
+            .network-settings-grid {
+                display: grid;
+                grid-template-columns: 1.35fr 1fr;
+                gap: 1rem;
+            }
+            .network-settings-panel {
+                border: 1px solid rgba(59, 130, 246, 0.2);
+                border-radius: 0.9rem;
+                padding: 0.9rem;
+                background: rgba(59, 130, 246, 0.06);
+            }
+            .network-settings-panel h3 {
+                margin: 0 0 0.7rem;
+                color: #1565c0;
+            }
+            .network-card {
+                border: 2px solid;
+                border-radius: 0.7rem;
+                margin-bottom: 0.8rem;
+                overflow: hidden;
+                background: rgba(255, 255, 255, 0.8);
+            }
+            .network-card-header {
+                font-weight: 700;
+                padding: 0.5rem 0.7rem;
+                color: #fff;
+            }
+            .network-card ul,
+            .network-info ul {
+                margin: 0;
+                padding: 0.7rem 1.1rem 0.8rem;
+            }
+            .network-card li,
+            .network-info li {
+                margin-bottom: 0.35rem;
+            }
+            .network-card.lan { border-color: #1976d2; }
+            .network-card.lan .network-card-header { background: #1976d2; }
+            .network-card.guest { border-color: #ef6c00; }
+            .network-card.guest .network-card-header { background: #ef6c00; }
+            .network-card.service { border-color: #78909c; }
+            .network-card.service .network-card-header { background: #78909c; }
+
             [data-testid="stDeployButton"],
             [data-testid="stToolbar"],
             [data-testid="stHeader"] {
                 display: none;
+            }
+            @media (max-width: 1000px) {
+                .network-settings-grid {
+                    grid-template-columns: 1fr;
+                }
             }
             @media (max-width: 768px) {
                 .mac-address-card {
