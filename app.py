@@ -2541,7 +2541,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
             st.success("Alle erkannten Clients sind aktuell verbunden.")
 
     with right_col:
-        st.markdown("**Verschiebbare Mesh-Ansicht (FRITZ!Box, Repeater, Online-Clients)**")
+        st.markdown("**Mesh-Ansicht**")
         if not visual_nodes:
             st.info("Keine verbundenen Geräte für die Topologie-Ansicht gefunden.")
         else:
@@ -2665,11 +2665,6 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                 height=480,
             )
 
-        st.caption(
-            "Nicht verbundene Clients stehen links in einer separaten Spalte. "
-            "FRITZ!Box/Repeater und verbundene Clients können rechts per Drag-and-Drop verschoben werden "
-            "(Positionen werden im Browser gespeichert)."
-        )
 
 
 
