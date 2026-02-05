@@ -147,6 +147,22 @@ class DectDevice:
     fw_version: Optional[str]
 
 
+@dataclass
+class DectBasisInfo:
+    dect_enabled: Optional[int]
+    dect_repeater_enabled: Optional[int]
+    eco_mode: Optional[int]
+    no_emission: Optional[int]
+    no_emission_state: Optional[int]
+    repeater_mode: Optional[int]
+    overlapped_sending: Optional[int]
+    ext_security: Optional[int]
+    catiq20support: Optional[int]
+    pin_protect: Optional[int]
+    avmuleaes: Optional[int]
+    rfpi: Optional[str]
+
+
 DECT_RSSI_INDEX_TO_DBM = {
     1: -92.7,
     2: -94.9,
@@ -607,6 +623,87 @@ def parse_dect_device_info(text: str) -> List[DectDevice]:
             )
         )
     return devices
+
+
+
+def parse_dect_basis_info(text: str) -> Optional[DectBasisInfo]:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION DECTBasisInfo")
+    if not section:
+        return None
+
+    basis_line = next((line.strip() for line in section.splitlines() if line.strip().startswith("Basis ")), "")
+    if not basis_line:
+        return None
+
+    values = {}
+    for part in basis_line.replace("Basis ", "", 1).split(","):
+        key, sep, value = part.strip().partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+
+    rfpi_line = next((line.strip() for line in section.splitlines() if line.strip().startswith("RFPI=")), "")
+    rfpi = rfpi_line.split("=", 1)[1].strip() if "=" in rfpi_line else None
+
+    return DectBasisInfo(
+        dect_enabled=parse_int(values.get("DECT_ENABLED")),
+        dect_repeater_enabled=parse_int(values.get("DECT_REPEATER_ENABLED")),
+        eco_mode=parse_int(values.get("ECOMode")),
+        no_emission=parse_int(values.get("NoEmission")),
+        no_emission_state=parse_int(values.get("NoEmissionState")),
+        repeater_mode=parse_int(values.get("RepeaterMode")),
+        overlapped_sending=parse_int(values.get("OverlappedSending")),
+        ext_security=parse_int(values.get("ExtSecurity")),
+        catiq20support=parse_int(values.get("CATIQ20SUPPORT")),
+        pin_protect=parse_int(values.get("PINProtect")),
+        avmuleaes=parse_int(values.get("AVMULEAES")),
+        rfpi=rfpi,
+    )
+
+
+def _format_on_off(value: Optional[int], yes: str = "Ja", no: str = "Nein") -> str:
+    if value is None:
+        return "k.A."
+    return yes if value == 1 else no
+
+
+def _format_no_emission_mode(value: Optional[int]) -> str:
+    mode_labels = {
+        0: "Nein",
+        1: "Ja",
+        2: "Nachtschaltung",
+    }
+    if value is None:
+        return "k.A."
+    return mode_labels.get(value, str(value))
+
+
+def _format_repeater_mode(value: Optional[int]) -> str:
+    if value is None:
+        return "k.A."
+    return "Ja" if value == 0 else "Nein"
+
+
+def render_dect_basis_info(info: Optional[DectBasisInfo]) -> None:
+    st.subheader("DECTBasisInfo")
+    if not info:
+        st.info("Keine DECT-Basisinformationen gefunden.")
+        return
+
+    rows = [
+        {"Eigenschaft": "DECT aktiviert", "Wert": _format_on_off(info.dect_enabled)},
+        {"Eigenschaft": "Als Repeater konfiguriert", "Wert": _format_on_off(info.dect_repeater_enabled)},
+        {"Eigenschaft": "Funkleistung verringern (ECOMode)", "Wert": _format_on_off(info.eco_mode)},
+        {"Eigenschaft": "DECT Eco aktiv", "Wert": _format_no_emission_mode(info.no_emission)},
+        {"Eigenschaft": "Aktueller DECT-Eco-Status", "Wert": info.no_emission_state if info.no_emission_state is not None else "k.A."},
+        {"Eigenschaft": "Verschlüsselung aktiv", "Wert": _format_repeater_mode(info.repeater_mode)},
+        {"Eigenschaft": "GAP-Problembehandlung", "Wert": _format_on_off(info.overlapped_sending)},
+        {"Eigenschaft": "Erweiterte Sicherheitsfunktionen", "Wert": _format_on_off(info.ext_security)},
+        {"Eigenschaft": "CATiq 2.0 aktiviert", "Wert": _format_on_off(info.catiq20support)},
+        {"Eigenschaft": "PIN-Schutz aktiv", "Wert": _format_on_off(info.pin_protect)},
+        {"Eigenschaft": "Smarthomegeräteverschlüsselung", "Wert": _format_on_off(info.avmuleaes)},
+        {"Eigenschaft": "RFPI (DECT-Basiskennung)", "Wert": info.rfpi or "k.A."},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def assess_dect_rssi(rssi: Optional[float]) -> str:
@@ -2149,6 +2246,7 @@ def parse_support_data(text: str) -> dict:
         "neighbour_clients": parse_neighbour_clients(text),
         "events": parse_events(text),
         "dect_devices": parse_dect_device_info(text),
+        "dect_basis_info": parse_dect_basis_info(text),
     }
 
 
@@ -2231,6 +2329,7 @@ def build_dashboard(text: str) -> None:
     neighbour_clients = parsed["neighbour_clients"]
     events = parsed["events"]
     dect_devices = parsed["dect_devices"]
+    dect_basis_info = parsed["dect_basis_info"]
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -2287,6 +2386,7 @@ def build_dashboard(text: str) -> None:
         render_telephony(voip_accounts)
 
     with tab_dect:
+        render_dect_basis_info(dect_basis_info)
         render_dect_devices(dect_devices)
 
     with tab_events:
