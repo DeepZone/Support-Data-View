@@ -612,7 +612,8 @@ def parse_mesh_topology(text: str) -> MeshTopology:
     return MeshTopology(nodes=nodes, links=list(links_by_uid.values()))
 
 
-def build_mesh_positions(mesh: MeshTopology) -> Dict[str, Tuple[float, float]]:
+def build_mesh_positions(mesh: MeshTopology, disconnected_clients: Optional[set] = None) -> Dict[str, Tuple[float, float]]:
+    disconnected_clients = disconnected_clients or set()
     nodes_by_uid = {node.get("uid"): node for node in mesh.nodes if node.get("uid")}
     links = [
         link for link in mesh.links if link.get("node_1_uid") in nodes_by_uid and link.get("node_2_uid") in nodes_by_uid
@@ -658,18 +659,64 @@ def build_mesh_positions(mesh: MeshTopology) -> Dict[str, Tuple[float, float]]:
         else:
             fallback_clients.append(client_uid)
 
+    disconnected_row: List[str] = []
     for parent_uid, assigned_clients in client_by_parent.items():
         parent_x, _ = positions[parent_uid]
-        for index, client_uid in enumerate(assigned_clients):
+        connected_clients = [uid for uid in assigned_clients if uid not in disconnected_clients]
+        disconnected_clients_on_parent = [uid for uid in assigned_clients if uid in disconnected_clients]
+
+        for index, client_uid in enumerate(connected_clients):
             row = index // 4
             column = index % 4
             offset_x = (column - 1.5) * 1.7
             positions[client_uid] = (parent_x + offset_x, -2.3 - (row * 2.0))
 
-    for index, client_uid in enumerate(fallback_clients):
-        positions[client_uid] = (index * 2.0, -8.0)
+        disconnected_row.extend(disconnected_clients_on_parent)
+
+    fallback_connected = [uid for uid in fallback_clients if uid not in disconnected_clients]
+    for index, client_uid in enumerate(fallback_connected):
+        positions[client_uid] = (index * 2.2, -6.6)
+
+    for client_uid in fallback_clients:
+        if client_uid in disconnected_clients:
+            disconnected_row.append(client_uid)
+
+    for index, client_uid in enumerate(disconnected_row):
+        positions[client_uid] = (index * 2.2, -8.8)
 
     return positions
+
+
+def is_mesh_client_connected(node: dict, mesh_links: List[dict]) -> bool:
+    for key in ("is_online", "online", "active"):
+        value = node.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value > 0
+
+    status_text = " ".join(
+        str(node.get(key, ""))
+        for key in ("status", "node_status", "connection_status", "online_status")
+    ).lower()
+    if any(token in status_text for token in ("offline", "disconnected", "down", "nicht verbunden")):
+        return False
+    if any(token in status_text for token in ("online", "connected", "up", "verbunden")):
+        return True
+
+    uid = node.get("uid")
+    related_links = [
+        link
+        for link in mesh_links
+        if uid in (link.get("node_1_uid"), link.get("node_2_uid"))
+    ]
+    if not related_links:
+        return False
+
+    link_states = " ".join(str(link.get("state", "")) for link in related_links).lower()
+    if any(token in link_states for token in ("offline", "disconnected", "down", "inactive")):
+        return False
+    return True
 
 
 
@@ -2406,8 +2453,17 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
         st.info("Keine Mesh-Topologie gefunden.")
         return
 
-    positions = build_mesh_positions(mesh)
     nodes_by_uid = {node.get("uid"): node for node in mesh.nodes if node.get("uid")}
+
+    disconnected_client_uids = set()
+    for uid, node in nodes_by_uid.items():
+        role = (node.get("mesh_role") or "").lower()
+        capabilities = set(node.get("device_capabilities") or [])
+        is_infra = role in {"master", "slave"} or "ROUTER" in capabilities or "WLAN_ACCESS_POINT" in capabilities
+        if not is_infra and not is_mesh_client_connected(node, mesh.links):
+            disconnected_client_uids.add(uid)
+
+    positions = build_mesh_positions(mesh, disconnected_client_uids)
 
     edge_x: List[float] = []
     edge_y: List[float] = []
@@ -2434,10 +2490,14 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
     infra_y: List[float] = []
     infra_text: List[str] = []
     infra_hover: List[str] = []
-    client_x: List[float] = []
-    client_y: List[float] = []
-    client_text: List[str] = []
-    client_hover: List[str] = []
+    client_connected_x: List[float] = []
+    client_connected_y: List[float] = []
+    client_connected_text: List[str] = []
+    client_connected_hover: List[str] = []
+    client_disconnected_x: List[float] = []
+    client_disconnected_y: List[float] = []
+    client_disconnected_text: List[str] = []
+    client_disconnected_hover: List[str] = []
 
     for uid, (x, y) in positions.items():
         node = nodes_by_uid.get(uid, {})
@@ -2464,10 +2524,18 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
             infra_text.append(name)
             infra_hover.append("<br>".join(hover_lines))
         else:
-            client_x.append(x)
-            client_y.append(y)
-            client_text.append(name)
-            client_hover.append("<br>".join(hover_lines))
+            is_connected = uid not in disconnected_client_uids
+            hover_lines.append(f"Status: {'Verbunden' if is_connected else 'Nicht verbunden'}")
+            if is_connected:
+                client_connected_x.append(x)
+                client_connected_y.append(y)
+                client_connected_text.append(name)
+                client_connected_hover.append("<br>".join(hover_lines))
+            else:
+                client_disconnected_x.append(x)
+                client_disconnected_y.append(y)
+                client_disconnected_text.append(name)
+                client_disconnected_hover.append("<br>".join(hover_lines))
 
     infra_trace = go.Scatter(
         x=infra_x,
@@ -2482,33 +2550,49 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
         name="Mesh Infrastruktur",
     )
 
-    client_trace = go.Scatter(
-        x=client_x,
-        y=client_y,
+    connected_client_trace = go.Scatter(
+        x=client_connected_x,
+        y=client_connected_y,
         mode="markers+text",
-        text=client_text,
+        text=client_connected_text,
         textposition="bottom center",
         textfont=dict(size=11),
         hovertemplate="%{customdata}<extra></extra>",
-        customdata=client_hover,
+        customdata=client_connected_hover,
         marker=dict(size=24, color="#2ca02c", line=dict(width=1.5, color="#ffffff"), symbol="circle"),
-        name="Clients",
+        name="Clients (verbunden)",
     )
 
-    fig = go.Figure(data=[edge_trace, infra_trace, client_trace])
+    disconnected_client_trace = go.Scatter(
+        x=client_disconnected_x,
+        y=client_disconnected_y,
+        mode="markers+text",
+        text=client_disconnected_text,
+        textposition="bottom center",
+        textfont=dict(size=11),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=client_disconnected_hover,
+        marker=dict(size=24, color="#d62728", line=dict(width=1.5, color="#ffffff"), symbol="circle"),
+        name="Clients (nicht verbunden)",
+    )
+
+    fig = go.Figure(data=[edge_trace, infra_trace, connected_client_trace, disconnected_client_trace])
     fig.update_layout(
         title="Mesh Netzwerk-Topologie",
         title_x=0.5,
         margin=dict(l=20, r=20, t=60, b=20),
         plot_bgcolor="rgba(0,0,0,0)",
-        height=max(520, 360 + (len(client_x) // 4) * 40),
+        height=max(520, 360 + ((len(client_connected_x) + len(client_disconnected_x)) // 4) * 40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
     )
 
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Darstellung ohne überlappende Clients: Infrastruktur oben, Clients pro Uplink in geordneten Reihen darunter.")
+    st.caption(
+        "Darstellung ohne überlappende Clients: Infrastruktur oben, verbundene Clients pro Uplink darunter. "
+        "Nicht verbundene Clients werden separat in rot dargestellt."
+    )
 
 
 
