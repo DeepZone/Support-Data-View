@@ -3276,6 +3276,30 @@ def main() -> None:
                 font-weight: 600;
                 transition: all 0.2s ease;
             }
+            .stTabs [data-baseweb="tab-panel"] {
+                border: 1px solid rgba(59, 130, 246, 0.2);
+                border-radius: 0.9rem;
+                padding: 1rem 1rem 1.2rem;
+                background: rgba(59, 130, 246, 0.06);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+            }
+            .stTabs [data-baseweb="tab-panel"] h3 {
+                color: #1565c0;
+            }
+            .stTabs [data-baseweb="tab-panel"] [data-testid="stMetric"] {
+                border: 1px solid rgba(59, 130, 246, 0.18);
+                border-radius: 0.7rem;
+                background: rgba(255, 255, 255, 0.72);
+                padding: 0.65rem 0.75rem;
+            }
+            .stTabs [data-baseweb="tab-panel"] [data-testid="stDataFrame"],
+            .stTabs [data-baseweb="tab-panel"] [data-testid="stPlotlyChart"],
+            .stTabs [data-baseweb="tab-panel"] [data-testid="stExpander"] {
+                border: 1px solid rgba(59, 130, 246, 0.16);
+                border-radius: 0.75rem;
+                background: rgba(255, 255, 255, 0.55);
+                padding: 0.3rem;
+            }
             .stTabs [aria-selected="true"] {
                 background: linear-gradient(135deg, rgba(59, 130, 246, 0.22), rgba(14, 165, 233, 0.2));
                 border-color: rgba(59, 130, 246, 0.55);
@@ -3308,6 +3332,24 @@ def main() -> None:
                     border-color: rgba(148, 163, 184, 0.6);
                     background: rgba(148, 163, 184, 0.16);
                     color: #e2e8f0;
+                }
+                .stTabs [data-baseweb="tab-panel"] {
+                    background: rgba(15, 23, 42, 0.72);
+                    border-color: rgba(56, 189, 248, 0.35);
+                    box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.2);
+                }
+                .stTabs [data-baseweb="tab-panel"] h3 {
+                    color: #7dd3fc;
+                }
+                .stTabs [data-baseweb="tab-panel"] [data-testid="stMetric"] {
+                    background: rgba(15, 23, 42, 0.76);
+                    border-color: rgba(56, 189, 248, 0.3);
+                }
+                .stTabs [data-baseweb="tab-panel"] [data-testid="stDataFrame"],
+                .stTabs [data-baseweb="tab-panel"] [data-testid="stPlotlyChart"],
+                .stTabs [data-baseweb="tab-panel"] [data-testid="stExpander"] {
+                    background: rgba(15, 23, 42, 0.64);
+                    border-color: rgba(56, 189, 248, 0.28);
                 }
                 .network-settings-panel {
                     background: rgba(15, 23, 42, 0.72);
