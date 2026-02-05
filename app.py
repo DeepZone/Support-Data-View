@@ -654,6 +654,25 @@ def parse_dtrace(text: str) -> List[DtraceEntry]:
 
     return entries
 
+
+def extract_dtrace_section(text: str) -> str:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION dtrace DTrace")
+    if not section:
+        return ""
+
+    cleaned_lines = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+        if stripped.startswith("##### BEGIN SECTION dtrace DTrace"):
+            continue
+        if stripped.startswith("##### END SECTION"):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
 def parse_float(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
@@ -2450,6 +2469,37 @@ def render_dtrace(entries: List[DtraceEntry]) -> None:
         )
         st.plotly_chart(comp_fig, use_container_width=True)
 
+    recurring_rows = [
+        {
+            "Level": entry.level,
+            "Komponente": entry.component or "(ohne)",
+            "Meldung": entry.message,
+        }
+        for entry in entries
+        if entry.message and entry.level in {"WARN", "ERROR", "CRIT"}
+    ]
+    if recurring_rows:
+        recurring_df = pd.DataFrame(recurring_rows)
+        recurring_agg = (
+            recurring_df.groupby(["Level", "Komponente", "Meldung"]).size().reset_index(name="Anzahl")
+            .sort_values("Anzahl", ascending=False)
+            .head(12)
+        )
+        recurring_agg["Meldung (gekürzt)"] = recurring_agg["Meldung"].apply(
+            lambda value: value if len(value) <= 110 else f"{value[:107]}..."
+        )
+        recurring_fig = px.bar(
+            recurring_agg,
+            x="Anzahl",
+            y="Meldung (gekürzt)",
+            color="Level",
+            orientation="h",
+            hover_data={"Komponente": True, "Meldung": True, "Anzahl": True},
+            title="Häufigste Warn-/Fehlermeldungen",
+        )
+        recurring_fig.update_layout(yaxis=dict(categoryorder="total ascending"))
+        st.plotly_chart(recurring_fig, use_container_width=True)
+
     table_df = pd.DataFrame(
         [
             {
@@ -2519,7 +2569,7 @@ def parse_support_data(text: str) -> dict:
     }
 
 
-def build_dashboard(text: str, dtrace_text: Optional[str] = None) -> None:
+def build_dashboard(text: str) -> None:
     fritz_model = parse_fritz_model(text) or "Unbekannt"
     firmware_version = parse_fritz_firmware_version(text) or "Unbekannt"
     uptime = parse_fritz_uptime_days_minutes(text) or "Unbekannt"
@@ -2600,6 +2650,7 @@ def build_dashboard(text: str, dtrace_text: Optional[str] = None) -> None:
     events = parsed["events"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
+    dtrace_text = extract_dtrace_section(text)
     dtrace_entries = parse_dtrace(dtrace_text) if dtrace_text else []
 
     mac_label = "MACa Adresse"
@@ -2877,14 +2928,12 @@ def main() -> None:
     st.title("Support-Daten Viewer")
 
     uploaded_file = st.file_uploader("Support-Data TXT", type=["txt"])
-    dtrace_file = st.file_uploader("DTrace TXT (optional)", type=["txt"])
     if uploaded_file is None:
         st.info("Bitte eine Support-Data TXT hochladen.")
         return
 
     text = uploaded_file.read().decode("utf-8", errors="ignore")
-    dtrace_text = dtrace_file.read().decode("utf-8", errors="ignore") if dtrace_file is not None else None
-    build_dashboard(text, dtrace_text=dtrace_text)
+    build_dashboard(text)
 
 
 if __name__ == "__main__":
