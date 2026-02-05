@@ -2519,9 +2519,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                 disconnected_clients_rows.append(
                     {
                         "Name": name,
-                        "Typ": node_type,
                         "MAC": node.get("device_mac_address") or "k.A.",
-                        "Status": "Nicht verbunden",
                     }
                 )
 
@@ -2557,7 +2555,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                 node["y"] = round(((node["y"] - min_y) / span_y) * 400 + 20, 2)
 
             graph_payload = {"nodes": visual_nodes, "links": visual_links}
-            graph_payload_json = html.escape(json.dumps(graph_payload, ensure_ascii=False))
+            graph_payload_b64 = base64.b64encode(json.dumps(graph_payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
 
             components.html(
                 f"""
@@ -2565,7 +2563,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                     <svg id="mesh-lines" width="100%" height="100%" style="position:absolute;top:0;left:0;pointer-events:none;"></svg>
                 </div>
                 <script>
-                    const payload = JSON.parse('{graph_payload_json}');
+                    const payload = JSON.parse(atob('{graph_payload_b64}'));
                     const wrapper = document.getElementById('mesh-wrapper');
                     const svg = document.getElementById('mesh-lines');
                     const storageKey = 'support-data-view-mesh-layout-v1';
