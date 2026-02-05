@@ -5,7 +5,7 @@ import sys
 import textwrap
 import zlib
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 import plotly.express as px
@@ -175,7 +175,7 @@ class DectBasisInfo:
     rfpi: Optional[str]
 
 
-DECT_RSSI_INDEX_TO_DBM = {
+DEFAULT_DECT_RSSI_INDEX_TO_DBM = {
     1: -92.7,
     2: -94.9,
     3: -92.7,
@@ -573,11 +573,27 @@ def parse_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
-def parse_dect_rssi_value(value: str) -> Optional[float]:
+def extract_dect_rssi_index_to_dbm(text: str) -> Dict[int, float]:
+    match = re.search(r"DECT_RSSI_INDEX_TO_DBM\s*[:=]\s*([^\n\r]+)", text)
+    if not match:
+        return DEFAULT_DECT_RSSI_INDEX_TO_DBM
+
+    raw_values = re.findall(r"-\d+(?:\.\d+)?", match.group(1))
+    if len(raw_values) != 10:
+        return DEFAULT_DECT_RSSI_INDEX_TO_DBM
+
+    parsed_values = [float(value) for value in raw_values]
+    if not all(value < 0 for value in parsed_values):
+        return DEFAULT_DECT_RSSI_INDEX_TO_DBM
+
+    return {index: value for index, value in enumerate(parsed_values, start=1)}
+
+
+def parse_dect_rssi_value(value: str, dect_rssi_index_to_dbm: Dict[int, float]) -> Optional[float]:
     parsed_value = parse_float(value)
     if parsed_value is None:
         return None
-    mapped_value = DECT_RSSI_INDEX_TO_DBM.get(int(parsed_value)) if parsed_value.is_integer() else None
+    mapped_value = dect_rssi_index_to_dbm.get(int(parsed_value)) if parsed_value.is_integer() else None
     return mapped_value if mapped_value is not None else parsed_value
 
 
@@ -591,7 +607,7 @@ def parse_dect_model(value: Optional[str]) -> Optional[str]:
     return f"{model_name} ({model_key})" if model_name else model_key
 
 
-def parse_dect_device_info(text: str) -> List[DectDevice]:
+def parse_dect_device_info(text: str, dect_rssi_index_to_dbm: Dict[int, float]) -> List[DectDevice]:
     section = extract_section_by_prefix(text, "##### BEGIN SECTION DECTDeviceInfo")
     if not section:
         return []
@@ -616,8 +632,8 @@ def parse_dect_device_info(text: str) -> List[DectDevice]:
         if len(values1) < 29:
             continue
 
-        rssi_values = [parse_dect_rssi_value(v) for v in values1[28:38] if v and v != "-"]
-        hg_rssi_values = [parse_dect_rssi_value(v) for v in values2[13:23] if v and v != "-"] if len(values2) >= 23 else []
+        rssi_values = [parse_dect_rssi_value(v, dect_rssi_index_to_dbm) for v in values1[28:38] if v and v != "-"]
+        hg_rssi_values = [parse_dect_rssi_value(v, dect_rssi_index_to_dbm) for v in values2[13:23] if v and v != "-"] if len(values2) >= 23 else []
 
         devices.append(
             DectDevice(
@@ -721,15 +737,9 @@ def render_dect_basis_info(info: Optional[DectBasisInfo]) -> None:
 def assess_dect_rssi(rssi: Optional[float]) -> str:
     if rssi is None:
         return "k.A."
-    if rssi >= -60:
-        return "Sehr gut"
-    if rssi >= -70:
-        return "Gut"
-    if rssi >= -80:
-        return "Mittel"
-    if rssi >= -90:
-        return "Kritisch"
-    return "Schlecht"
+    if rssi > -80:
+        return "Eher ungünstig"
+    return "Unauffällig"
 
 
 def _parse_internet_connections(section: str) -> List[str]:
@@ -2301,12 +2311,13 @@ def render_dect_devices(devices: List[DectDevice]) -> None:
 
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.caption("Einschätzung basiert auf durchschnittlichem RSSI: ≥-60 sehr gut, ≥-70 gut, ≥-80 mittel, ≥-90 kritisch, < -90 schlecht.")
+    st.caption("Einschätzung basiert auf durchschnittlichem RSSI: Werte > -80 dBm sind eher ungünstig.")
 
 
 @st.cache_data(show_spinner=False)
 def parse_support_data(text: str) -> dict:
     access_technology = detect_access_technology(text)
+    dect_rssi_index_to_dbm = extract_dect_rssi_index_to_dbm(text)
     return {
         "access_technology": access_technology,
         "device_mac": extract_device_mac(text),
@@ -2324,7 +2335,7 @@ def parse_support_data(text: str) -> dict:
         "voip_accounts": parse_voip_accounts(text),
         "neighbour_clients": parse_neighbour_clients(text),
         "events": parse_events(text),
-        "dect_devices": parse_dect_device_info(text),
+        "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
     }
 
