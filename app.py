@@ -1090,15 +1090,17 @@ def _strip_quotes(value: Optional[str]) -> Optional[str]:
     return value.strip().rstrip(';').strip().strip('"').strip("'")
 
 
-def _format_on_off(value: Optional[str]) -> str:
-    if not value:
+def _format_on_off(value: Optional[object]) -> str:
+    if value is None:
         return "k.A."
-    normalized = value.strip().lower()
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return "k.A."
     if normalized in {"yes", "on", "1", "true", "enabled"}:
         return "Aktiviert"
     if normalized in {"no", "off", "0", "false", "disabled"}:
         return "Deaktiviert"
-    return value
+    return str(value)
 
 
 def _mode_label(raw_mode: Optional[str]) -> str:
