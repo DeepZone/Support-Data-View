@@ -11,7 +11,6 @@ visualisiert.
 - WLAN-Clientliste inkl. Verbindungseinschätzung
 - LAN/WAN-Portstatus
 - Upload-Funktion für Support-Data-TXT
-- Optionaler DTrace-Upload mit eigener Analyse-Ansicht (inkl. Charts)
 
 ## Starten
 
