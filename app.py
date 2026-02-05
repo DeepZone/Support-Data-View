@@ -5,6 +5,7 @@ import sys
 import textwrap
 import zlib
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -116,6 +117,15 @@ class NeighbourClient:
 class EventEntry:
     date: str
     time: str
+    message: str
+
+
+@dataclass
+class DtraceEntry:
+    raw_line: str
+    timestamp: Optional[datetime]
+    level: str
+    component: Optional[str]
     message: str
 
 
@@ -560,6 +570,89 @@ def parse_events(text: str) -> List[EventEntry]:
         entries.append(EventEntry(date=match.group(1), time=match.group(2), message=match.group(3)))
     return entries
 
+
+
+
+def parse_dtrace_timestamp(value: str) -> Optional[datetime]:
+    value = value.strip()
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%d.%m.%Y %H:%M:%S.%f",
+        "%d.%m.%Y %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_dtrace(text: str) -> List[DtraceEntry]:
+    entries: List[DtraceEntry] = []
+    level_pattern = r"(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|ERR|CRIT|CRITICAL|NOTICE)"
+    patterns = [
+        re.compile(
+            rf"^(?P<ts>\d{{4}}-\d{{2}}-\d{{2}}[ T]\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?)\s+"
+            rf"(?:\[(?P<lvl>{level_pattern})\]|(?P<lvl2>{level_pattern}))"
+            rf"\s*(?:\[(?P<comp>[^\]]+)\]|(?P<comp2>[A-Za-z0-9_.:/-]+):)?\s*(?P<msg>.*)$",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            rf"^(?P<ts>\d{{2}}\.\d{{2}}\.\d{{4}}\s+\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?)\s+"
+            rf"(?:\[(?P<lvl>{level_pattern})\]|(?P<lvl2>{level_pattern}))"
+            rf"\s*(?:\[(?P<comp>[^\]]+)\]|(?P<comp2>[A-Za-z0-9_.:/-]+):)?\s*(?P<msg>.*)$",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        parsed = None
+        for pattern in patterns:
+            match = pattern.match(line)
+            if not match:
+                continue
+            timestamp = parse_dtrace_timestamp(match.group("ts") or "")
+            level = (match.group("lvl") or match.group("lvl2") or "UNBEKANNT").upper()
+            if level == "WARNING":
+                level = "WARN"
+            if level == "ERR":
+                level = "ERROR"
+            if level == "CRITICAL":
+                level = "CRIT"
+            component = (match.group("comp") or match.group("comp2") or "").strip() or None
+            message = (match.group("msg") or "").strip()
+            parsed = DtraceEntry(
+                raw_line=raw_line,
+                timestamp=timestamp,
+                level=level,
+                component=component,
+                message=message,
+            )
+            break
+
+        if parsed is None:
+            parsed = DtraceEntry(
+                raw_line=raw_line,
+                timestamp=None,
+                level="UNBEKANNT",
+                component=None,
+                message=line,
+            )
+
+        entries.append(parsed)
+
+    return entries
 
 def parse_float(value: Optional[str]) -> Optional[float]:
     if value is None:
@@ -2285,6 +2378,92 @@ def render_events(events: List[EventEntry]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+
+
+def render_dtrace(entries: List[DtraceEntry]) -> None:
+    st.subheader("DTrace Analyse")
+    if not entries:
+        st.info("Keine DTrace-Einträge gefunden.")
+        return
+
+    total_entries = len(entries)
+    error_count = sum(1 for entry in entries if entry.level in {"ERROR", "CRIT"})
+    warn_count = sum(1 for entry in entries if entry.level == "WARN")
+    unknown_count = sum(1 for entry in entries if entry.level == "UNBEKANNT")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Einträge", f"{total_entries}")
+    c2.metric("Fehler (ERROR/CRIT)", f"{error_count}")
+    c3.metric("Warnungen", f"{warn_count}")
+    c4.metric("Unbekanntes Format", f"{unknown_count}")
+
+    level_df = pd.DataFrame([{"Level": entry.level} for entry in entries])
+    level_count_df = level_df.value_counts("Level").reset_index(name="Anzahl")
+    level_count_df = level_count_df.sort_values("Anzahl", ascending=False)
+    level_fig = px.bar(
+        level_count_df,
+        x="Level",
+        y="Anzahl",
+        color="Level",
+        title="DTrace Log-Level Verteilung",
+        text="Anzahl",
+    )
+    level_fig.update_layout(showlegend=False)
+    st.plotly_chart(level_fig, use_container_width=True)
+
+    timeline_rows = [
+        {"timestamp": entry.timestamp, "level": entry.level}
+        for entry in entries
+        if entry.timestamp is not None
+    ]
+    if timeline_rows:
+        timeline_df = pd.DataFrame(timeline_rows)
+        timeline_df["minute"] = timeline_df["timestamp"].dt.floor("min")
+        timeline_agg = timeline_df.groupby(["minute", "level"]).size().reset_index(name="Anzahl")
+        time_fig = px.line(
+            timeline_agg,
+            x="minute",
+            y="Anzahl",
+            color="level",
+            markers=True,
+            title="DTrace Ereignisse im Zeitverlauf (pro Minute)",
+        )
+        st.plotly_chart(time_fig, use_container_width=True)
+    else:
+        st.info("Keine Zeitstempel erkannt – Zeitverlaufsdiagramm nicht möglich.")
+
+    component_rows = [
+        {"Komponente": entry.component or "(ohne)", "Level": entry.level}
+        for entry in entries
+        if entry.level in {"ERROR", "CRIT", "WARN"}
+    ]
+    if component_rows:
+        comp_df = pd.DataFrame(component_rows)
+        comp_count_df = comp_df.groupby(["Komponente", "Level"]).size().reset_index(name="Anzahl")
+        comp_fig = px.bar(
+            comp_count_df,
+            x="Komponente",
+            y="Anzahl",
+            color="Level",
+            barmode="stack",
+            title="Warnungen/Fehler nach Komponente",
+        )
+        st.plotly_chart(comp_fig, use_container_width=True)
+
+    table_df = pd.DataFrame(
+        [
+            {
+                "Zeit": entry.timestamp.strftime("%Y-%m-%d %H:%M:%S") if entry.timestamp else "k.A.",
+                "Level": entry.level,
+                "Komponente": entry.component or "k.A.",
+                "Meldung": entry.message,
+                "Raw": entry.raw_line,
+            }
+            for entry in entries
+        ]
+    )
+    st.dataframe(table_df, use_container_width=True, hide_index=True)
+
 def render_dect_devices(devices: List[DectDevice]) -> None:
     st.subheader("DECTDeviceInfo")
     if not devices:
@@ -2340,7 +2519,7 @@ def parse_support_data(text: str) -> dict:
     }
 
 
-def build_dashboard(text: str) -> None:
+def build_dashboard(text: str, dtrace_text: Optional[str] = None) -> None:
     fritz_model = parse_fritz_model(text) or "Unbekannt"
     firmware_version = parse_fritz_firmware_version(text) or "Unbekannt"
     uptime = parse_fritz_uptime_days_minutes(text) or "Unbekannt"
@@ -2421,6 +2600,7 @@ def build_dashboard(text: str) -> None:
     events = parsed["events"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
+    dtrace_entries = parse_dtrace(dtrace_text) if dtrace_text else []
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -2448,9 +2628,11 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_dect, tab_events = st.tabs(
-        [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "DECT", "Events"]
-    )
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "DECT", "Events"]
+    if dtrace_entries:
+        tab_names.append("DTrace")
+    tabs = st.tabs(tab_names)
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_dect, tab_events = tabs[:7]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -2483,6 +2665,10 @@ def build_dashboard(text: str) -> None:
 
     with tab_events:
         render_events(events)
+
+    if dtrace_entries:
+        with tabs[7]:
+            render_dtrace(dtrace_entries)
 
 
 def _is_running_with_streamlit() -> bool:
@@ -2691,12 +2877,14 @@ def main() -> None:
     st.title("Support-Daten Viewer")
 
     uploaded_file = st.file_uploader("Support-Data TXT", type=["txt"])
+    dtrace_file = st.file_uploader("DTrace TXT (optional)", type=["txt"])
     if uploaded_file is None:
         st.info("Bitte eine Support-Data TXT hochladen.")
         return
 
     text = uploaded_file.read().decode("utf-8", errors="ignore")
-    build_dashboard(text)
+    dtrace_text = dtrace_file.read().decode("utf-8", errors="ignore") if dtrace_file is not None else None
+    build_dashboard(text, dtrace_text=dtrace_text)
 
 
 if __name__ == "__main__":

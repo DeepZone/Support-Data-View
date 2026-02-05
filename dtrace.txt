@@ -1,0 +1,8 @@
+2026-01-14 08:15:01.120 [INFO] [boot] DTrace started
+2026-01-14 08:15:03.009 [DEBUG] [wan] Interface pppoe0 initialized
+2026-01-14 08:15:10.442 [WARN] [dsl] SNR margin dropped below threshold: 5.2 dB
+2026-01-14 08:15:11.872 [ERROR] [dsl] Retrain triggered due to LOS event
+2026-01-14 08:16:30.012 [INFO] [dsl] Link back in showtime, sync restored
+14.01.2026 08:16:45 WARN wlan: DFS event detected, channel switch pending
+2026-01-14T08:17:20 [CRIT] [voice] SIP registration failed repeatedly
+unstructured line without parser format
