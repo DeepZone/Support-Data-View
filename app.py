@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 
 
@@ -2465,39 +2466,9 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
 
     positions = build_mesh_positions(mesh, disconnected_client_uids)
 
-    edge_x: List[float] = []
-    edge_y: List[float] = []
-    for link in mesh.links:
-        node_1_uid = link.get("node_1_uid")
-        node_2_uid = link.get("node_2_uid")
-        if node_1_uid not in positions or node_2_uid not in positions:
-            continue
-        x0, y0 = positions[node_1_uid]
-        x1, y1 = positions[node_2_uid]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
-
-    edge_trace = go.Scatter(
-        x=edge_x,
-        y=edge_y,
-        mode="lines",
-        hoverinfo="none",
-        line=dict(width=1.8, color="#8b8f97"),
-        showlegend=False,
-    )
-
-    infra_x: List[float] = []
-    infra_y: List[float] = []
-    infra_text: List[str] = []
-    infra_hover: List[str] = []
-    client_connected_x: List[float] = []
-    client_connected_y: List[float] = []
-    client_connected_text: List[str] = []
-    client_connected_hover: List[str] = []
-    client_disconnected_x: List[float] = []
-    client_disconnected_y: List[float] = []
-    client_disconnected_text: List[str] = []
-    client_disconnected_hover: List[str] = []
+    disconnected_clients_rows: List[dict] = []
+    visual_nodes: List[dict] = []
+    visible_uids: set[str] = set()
 
     for uid, (x, y) in positions.items():
         node = nodes_by_uid.get(uid, {})
@@ -2519,80 +2490,186 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
             f"MAC: {html.escape(node.get('device_mac_address') or 'k.A.')}",
         ]
         if is_infra:
-            infra_x.append(x)
-            infra_y.append(y)
-            infra_text.append(name)
-            infra_hover.append("<br>".join(hover_lines))
+            visual_nodes.append(
+                {
+                    "uid": uid,
+                    "name": name,
+                    "role": role_label,
+                    "type": "infra",
+                    "x": x,
+                    "y": y,
+                }
+            )
+            visible_uids.add(uid)
         else:
             is_connected = uid not in disconnected_client_uids
-            hover_lines.append(f"Status: {'Verbunden' if is_connected else 'Nicht verbunden'}")
             if is_connected:
-                client_connected_x.append(x)
-                client_connected_y.append(y)
-                client_connected_text.append(name)
-                client_connected_hover.append("<br>".join(hover_lines))
+                visual_nodes.append(
+                    {
+                        "uid": uid,
+                        "name": name,
+                        "role": role_label,
+                        "type": "client",
+                        "x": x,
+                        "y": y,
+                    }
+                )
+                visible_uids.add(uid)
             else:
-                client_disconnected_x.append(x)
-                client_disconnected_y.append(y)
-                client_disconnected_text.append(name)
-                client_disconnected_hover.append("<br>".join(hover_lines))
+                disconnected_clients_rows.append(
+                    {
+                        "Name": name,
+                        "Typ": node_type,
+                        "MAC": node.get("device_mac_address") or "k.A.",
+                        "Status": "Nicht verbunden",
+                    }
+                )
 
-    infra_trace = go.Scatter(
-        x=infra_x,
-        y=infra_y,
-        mode="markers+text",
-        text=infra_text,
-        textposition="top center",
-        textfont=dict(size=12),
-        hovertemplate="%{customdata}<extra></extra>",
-        customdata=infra_hover,
-        marker=dict(size=38, color="#1f77b4", line=dict(width=2, color="#ffffff"), symbol="square"),
-        name="Mesh Infrastruktur",
-    )
+    visual_links: List[dict] = []
+    for link in mesh.links:
+        source = link.get("node_1_uid")
+        target = link.get("node_2_uid")
+        if source in visible_uids and target in visible_uids:
+            visual_links.append({"source": source, "target": target})
 
-    connected_client_trace = go.Scatter(
-        x=client_connected_x,
-        y=client_connected_y,
-        mode="markers+text",
-        text=client_connected_text,
-        textposition="bottom center",
-        textfont=dict(size=11),
-        hovertemplate="%{customdata}<extra></extra>",
-        customdata=client_connected_hover,
-        marker=dict(size=24, color="#2ca02c", line=dict(width=1.5, color="#ffffff"), symbol="circle"),
-        name="Clients (verbunden)",
-    )
+    left_col, right_col = st.columns([1, 3])
+    with left_col:
+        st.markdown("**Nicht verbundene Clients**")
+        if disconnected_clients_rows:
+            st.dataframe(pd.DataFrame(disconnected_clients_rows), use_container_width=True, hide_index=True)
+        else:
+            st.success("Alle erkannten Clients sind aktuell verbunden.")
 
-    disconnected_client_trace = go.Scatter(
-        x=client_disconnected_x,
-        y=client_disconnected_y,
-        mode="markers+text",
-        text=client_disconnected_text,
-        textposition="bottom center",
-        textfont=dict(size=11),
-        hovertemplate="%{customdata}<extra></extra>",
-        customdata=client_disconnected_hover,
-        marker=dict(size=24, color="#d62728", line=dict(width=1.5, color="#ffffff"), symbol="circle"),
-        name="Clients (nicht verbunden)",
-    )
+    with right_col:
+        st.markdown("**Verschiebbare Mesh-Ansicht (FRITZ!Box, Repeater, Online-Clients)**")
+        if not visual_nodes:
+            st.info("Keine verbundenen Geräte für die Topologie-Ansicht gefunden.")
+        else:
+            min_x = min(node["x"] for node in visual_nodes)
+            max_x = max(node["x"] for node in visual_nodes)
+            min_y = min(node["y"] for node in visual_nodes)
+            max_y = max(node["y"] for node in visual_nodes)
+            span_x = max(1.0, max_x - min_x)
+            span_y = max(1.0, max_y - min_y)
 
-    fig = go.Figure(data=[edge_trace, infra_trace, connected_client_trace, disconnected_client_trace])
-    fig.update_layout(
-        title="Mesh Netzwerk-Topologie",
-        title_x=0.5,
-        margin=dict(l=20, r=20, t=60, b=20),
-        plot_bgcolor="rgba(0,0,0,0)",
-        height=max(520, 360 + ((len(client_connected_x) + len(client_disconnected_x)) // 4) * 40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-    )
+            for node in visual_nodes:
+                node["x"] = round(((node["x"] - min_x) / span_x) * 760 + 20, 2)
+                node["y"] = round(((node["y"] - min_y) / span_y) * 400 + 20, 2)
 
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        "Darstellung ohne überlappende Clients: Infrastruktur oben, verbundene Clients pro Uplink darunter. "
-        "Nicht verbundene Clients werden separat in rot dargestellt."
-    )
+            graph_payload = {"nodes": visual_nodes, "links": visual_links}
+            graph_payload_json = html.escape(json.dumps(graph_payload, ensure_ascii=False))
+
+            components.html(
+                f"""
+                <div id="mesh-wrapper" style="border:1px solid #d7dbe2;border-radius:8px;background:#fbfcff;height:470px;position:relative;overflow:hidden;">
+                    <svg id="mesh-lines" width="100%" height="100%" style="position:absolute;top:0;left:0;pointer-events:none;"></svg>
+                </div>
+                <script>
+                    const payload = JSON.parse('{graph_payload_json}');
+                    const wrapper = document.getElementById('mesh-wrapper');
+                    const svg = document.getElementById('mesh-lines');
+                    const storageKey = 'support-data-view-mesh-layout-v1';
+                    const saved = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
+
+                    const nodeMap = new Map();
+                    payload.nodes.forEach(node => {{
+                        const div = document.createElement('div');
+                        const persisted = saved[node.uid];
+                        const nodeX = persisted && Number.isFinite(persisted.x) ? persisted.x : node.x;
+                        const nodeY = persisted && Number.isFinite(persisted.y) ? persisted.y : node.y;
+                        div.dataset.uid = node.uid;
+                        div.dataset.type = node.type;
+                        div.style.position = 'absolute';
+                        div.style.left = `${{nodeX}}px`;
+                        div.style.top = `${{nodeY}}px`;
+                        div.style.cursor = 'grab';
+                        div.style.userSelect = 'none';
+                        div.style.padding = node.type === 'infra' ? '8px 10px' : '6px 9px';
+                        div.style.borderRadius = '10px';
+                        div.style.fontSize = '12px';
+                        div.style.fontWeight = '600';
+                        div.style.boxShadow = '0 2px 8px rgba(0,0,0,0.10)';
+                        div.style.border = '1px solid #ffffff';
+                        div.style.background = node.type === 'infra' ? '#1f77b4' : '#2ca02c';
+                        div.style.color = '#ffffff';
+                        div.innerText = `${{node.name}} · ${{node.role}}`;
+                        wrapper.appendChild(div);
+                        nodeMap.set(node.uid, div);
+                    }});
+
+                    const drawLinks = () => {{
+                        svg.innerHTML = '';
+                        payload.links.forEach(link => {{
+                            const source = nodeMap.get(link.source);
+                            const target = nodeMap.get(link.target);
+                            if (!source || !target) return;
+                            const x1 = source.offsetLeft + source.offsetWidth / 2;
+                            const y1 = source.offsetTop + source.offsetHeight / 2;
+                            const x2 = target.offsetLeft + target.offsetWidth / 2;
+                            const y2 = target.offsetTop + target.offsetHeight / 2;
+                            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                            line.setAttribute('x1', x1);
+                            line.setAttribute('y1', y1);
+                            line.setAttribute('x2', x2);
+                            line.setAttribute('y2', y2);
+                            line.setAttribute('stroke', '#8b8f97');
+                            line.setAttribute('stroke-width', '2');
+                            svg.appendChild(line);
+                        }});
+                    }};
+
+                    nodeMap.forEach((nodeDiv, uid) => {{
+                        let startX = 0;
+                        let startY = 0;
+                        let dragging = false;
+
+                        const onPointerMove = (event) => {{
+                            if (!dragging) return;
+                            const deltaX = event.clientX - startX;
+                            const deltaY = event.clientY - startY;
+                            const currentX = parseFloat(nodeDiv.style.left) + deltaX;
+                            const currentY = parseFloat(nodeDiv.style.top) + deltaY;
+                            const maxX = wrapper.clientWidth - nodeDiv.offsetWidth;
+                            const maxY = wrapper.clientHeight - nodeDiv.offsetHeight;
+                            nodeDiv.style.left = `${{Math.max(0, Math.min(maxX, currentX))}}px`;
+                            nodeDiv.style.top = `${{Math.max(0, Math.min(maxY, currentY))}}px`;
+                            startX = event.clientX;
+                            startY = event.clientY;
+                            drawLinks();
+                        }};
+
+                        const onPointerUp = () => {{
+                            if (!dragging) return;
+                            dragging = false;
+                            nodeDiv.style.cursor = 'grab';
+                            const latest = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
+                            latest[uid] = {{ x: parseFloat(nodeDiv.style.left), y: parseFloat(nodeDiv.style.top) }};
+                            localStorage.setItem(storageKey, JSON.stringify(latest));
+                            window.removeEventListener('pointermove', onPointerMove);
+                            window.removeEventListener('pointerup', onPointerUp);
+                        }};
+
+                        nodeDiv.addEventListener('pointerdown', (event) => {{
+                            dragging = true;
+                            startX = event.clientX;
+                            startY = event.clientY;
+                            nodeDiv.style.cursor = 'grabbing';
+                            window.addEventListener('pointermove', onPointerMove);
+                            window.addEventListener('pointerup', onPointerUp);
+                        }});
+                    }});
+
+                    drawLinks();
+                </script>
+                """,
+                height=480,
+            )
+
+        st.caption(
+            "Nicht verbundene Clients stehen links in einer separaten Spalte. "
+            "FRITZ!Box/Repeater und verbundene Clients können rechts per Drag-and-Drop verschoben werden "
+            "(Positionen werden im Browser gespeichert)."
+        )
 
 
 
