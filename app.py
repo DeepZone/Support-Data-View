@@ -2627,21 +2627,30 @@ def render_dtrace(raw_text: str) -> None:
     analysis = parse_dtrace_call_analysis(raw_text)
 
     if not analysis.q931_lines:
-        st.info("Im dtrace-Abschnitt wurden keine Q.931-Daten gefunden. Der Tab wird nur angezeigt, wenn der Abschnitt Daten enthält.")
+        st.info(
+            "Im dtrace-Abschnitt sind zwar Daten vorhanden, aber keine Q.931-Call-Control-Nachrichten "
+            "(`Protocol discriminator Q.931: 08`) belegbar. Eine Call-Leg-Analyse ist daher nicht möglich."
+        )
         return
 
     st.markdown("### A) Executive Summary")
     call_leg_count = len(analysis.legs)
     st.markdown(f"- **Anzahl Call-Legs:** {call_leg_count}")
+    st.markdown(f"- **Q.931-Rohzeilen (belegbar):** {len(analysis.q931_lines)}")
 
-    has_25s_pattern = False
+    legs_with_25s: List[str] = []
     no_route_legs: List[str] = []
+    normal_clearing_legs: List[str] = []
 
     for leg in analysis.legs:
         start_event = leg.events[0] if leg.events else None
         disconnect_event = next((event for event in leg.events if event.message_type == "DISCONNECT"), None)
         release_complete_event = next((event for event in leg.events if event.message_type == "RELEASE COMPLETE"), None)
-        final_cause = disconnect_event.cause if disconnect_event and disconnect_event.cause else "nicht belegbar im Mitschnitt"
+        disconnect_cause = (
+            disconnect_event.cause
+            if disconnect_event and disconnect_event.cause
+            else "nicht belegbar im DISCONNECT"
+        )
 
         duration_to_disconnect: Optional[float] = None
         duration_to_release_complete: Optional[float] = None
@@ -2652,11 +2661,13 @@ def render_dtrace(raw_text: str) -> None:
             duration_to_release_complete = release_complete_event.timestamp_seconds - start_event.timestamp_seconds
 
         if duration_to_disconnect is not None and 23.0 <= duration_to_disconnect <= 27.0:
-            has_25s_pattern = True
+            legs_with_25s.append(leg.leg_id)
 
-        cause_text_lower = final_cause.lower()
+        cause_text_lower = disconnect_cause.lower()
         if "no route to destination" in cause_text_lower:
             no_route_legs.append(leg.leg_id)
+        if "normal call clearing" in cause_text_lower:
+            normal_clearing_legs.append(leg.leg_id)
 
         start_label = start_event.timestamp_label if start_event else "k.A."
         end_label = release_complete_event.timestamp_label if release_complete_event else (disconnect_event.timestamp_label if disconnect_event else "k.A.")
@@ -2665,32 +2676,30 @@ def render_dtrace(raw_text: str) -> None:
             f"- **{leg.leg_id}** – Start: {start_label}, Ende: {end_label}, "
             f"Dauer bis DISCONNECT: {format_relative_duration(duration_to_disconnect)}, "
             f"Dauer bis RELEASE COMPLETE: {format_relative_duration(duration_to_release_complete)}, "
-            f"Finaler Cause: {final_cause}"
+            f"Maßgeblicher DISCONNECT-Cause: {disconnect_cause}"
         )
 
-    legs_with_25s = [
-        leg.leg_id
-        for leg in analysis.legs
-        if leg.events
-        for start_event in [leg.events[0]]
-        for disconnect_event in [next((event for event in leg.events if event.message_type == "DISCONNECT"), None)]
-        if start_event
-        and disconnect_event
-        and start_event.timestamp_seconds is not None
-        and disconnect_event.timestamp_seconds is not None
-        and 23.0 <= (disconnect_event.timestamp_seconds - start_event.timestamp_seconds) <= 27.0
-    ]
     if legs_with_25s:
         st.markdown(f"- **~25s-Muster:** ja ({', '.join(legs_with_25s)})")
     else:
         st.markdown("- **~25s-Muster:** nein")
 
-    if no_route_legs:
-        st.markdown(f"- **Lokales Routing-Problem `No route to destination`:** ja ({', '.join(no_route_legs)})")
+    if call_leg_count > 1:
+        st.markdown("- **Parallele Call-Legs:** ja (mehr als ein Leg im Mitschnitt erfasst)")
     else:
-        st.markdown("- **Lokales Routing-Problem `No route to destination`:** nein")
+        st.markdown("- **Parallele Call-Legs:** nein")
 
-    st.markdown("### B) Detail pro Call-Leg")
+    if no_route_legs:
+        st.markdown(f"- **DISCONNECT-Cause `No route to destination`:** ja ({', '.join(no_route_legs)})")
+    else:
+        st.markdown("- **DISCONNECT-Cause `No route to destination`:** nein")
+
+    if normal_clearing_legs:
+        st.markdown(f"- **DISCONNECT-Cause `Normal call clearing`:** ja ({', '.join(normal_clearing_legs)})")
+    else:
+        st.markdown("- **DISCONNECT-Cause `Normal call clearing`:** nein")
+
+    st.markdown("### B) Detailanalyse pro Call-Leg")
     if not analysis.legs:
         st.info("Keine Call-Legs rekonstruierbar (Controller/CallRef/Richtung nicht eindeutig vorhanden).")
 
@@ -2720,15 +2729,22 @@ def render_dtrace(raw_text: str) -> None:
         else:
             st.markdown("- Keine Q.931-Nachrichten für dieses Leg erfasst.")
 
-        final_event = next(
-            (event for event in reversed(leg.events) if event.message_type in {"DISCONNECT", "RELEASE", "RELEASE COMPLETE"}),
-            None,
-        )
-        if final_event and final_event.cause:
-            st.markdown("**Finaler DISCONNECT/RELEASE Cause (Logzitat):**")
-            st.code(f"{quote_line(final_event.raw_line)}\n{quote_line(final_event.cause)}")
+        disconnect_event = next((event for event in leg.events if event.message_type == "DISCONNECT"), None)
+        if disconnect_event and disconnect_event.cause:
+            st.markdown("**Maßgeblicher DISCONNECT-Cause (Logzitat):**")
+            st.code(f"{quote_line(disconnect_event.raw_line)}\n{quote_line(disconnect_event.cause)}")
         else:
-            st.markdown("**Finaler DISCONNECT/RELEASE Cause:** nicht belegbar im Mitschnitt.")
+            st.markdown("**Maßgeblicher DISCONNECT-Cause:** nicht belegbar im Mitschnitt.")
+
+        release_event = next((event for event in leg.events if event.message_type == "RELEASE"), None)
+        release_complete_event = next((event for event in leg.events if event.message_type == "RELEASE COMPLETE"), None)
+        if release_event or release_complete_event:
+            release_bits = []
+            if release_event:
+                release_bits.append(f"RELEASE: {release_event.timestamp_label}")
+            if release_complete_event:
+                release_bits.append(f"RELEASE COMPLETE: {release_complete_event.timestamp_label}")
+            st.markdown(f"**Release-Sequenz:** {', '.join(release_bits)}")
 
         correlated: List[Tuple[float, DectCorrelationEvent]] = []
         if leg.events:
@@ -2754,29 +2770,42 @@ def render_dtrace(raw_text: str) -> None:
                     f"- {dect_event.timestamp_label} – {dect_event.event_name} "
                     f"(korreliert, zeitlicher Abstand {delta:.2f}s)"
                 )
+        else:
+            st.markdown("**DECT-Korrelation (±5s):** keine korrelierbaren DECT-Events im definierten Zeitfenster.")
 
-    st.markdown("### C) Findings & Nächste Checks")
-    if has_25s_pattern:
-        st.markdown(
-            "- Für Legs mit ~25s bis DISCONNECT ist eine providerseitige Umleitung nach Zeit (Sprachbox/Mailbox) "
-            "eine **plausible** Erklärung. Bitte Rufumleitungen / Weiterleitung nach Zeit im Anschluss prüfen."
-        )
-    else:
-        st.markdown("- Kein ~25s-Muster belegbar im Mitschnitt.")
+    st.markdown("### C) Technische Einordnung")
+    st.markdown(
+        "- **Q.931-Signalisierung:** Die Call-Leg-Auswertung basiert ausschließlich auf "
+        "Controller + Call Reference + Richtung sowie den explizit erkannten Q.931-Message-Types."
+    )
 
     if no_route_legs:
         st.markdown(
-            "- Für Legs mit `No route to destination` sollten interne Zielzuordnung, Rufgruppe, Parallelruf-Ziele und "
-            "Erreichbarkeit der Nebenstellen geprüft werden."
+            "- **Lokale Routing-/Zielkonfiguration:** Für die genannten Legs ist `No route to destination` "
+            "als DISCONNECT-Cause protokolliert. Mehr Aussage ist ohne zusätzliche Trace-Belege nicht möglich."
         )
     else:
-        st.markdown("- Kein `No route to destination` im ausgewerteten Q.931-Material erkannt.")
+        st.markdown("- **Lokale Routing-/Zielkonfiguration:** Kein DISCONNECT-Cause `No route to destination` belegt.")
 
-    if call_leg_count > 1:
+    if normal_clearing_legs:
         st.markdown(
-            "- Parallele Legs erkannt. Welcher Leg Hauptcall vs. Neben-/Gruppenleg ist, wird nur genannt, wenn klar aus "
-            "Call-Flow und Cause ableitbar; sonst: nicht belegbar im Mitschnitt."
+            "- **Netz/Provider-Signalisierung:** Für die genannten Legs ist `Normal call clearing` als regulärer "
+            "Abschluss im DISCONNECT belegt."
         )
+    else:
+        st.markdown("- **Netz/Provider-Signalisierung:** Kein DISCONNECT-Cause `Normal call clearing` belegt.")
+
+    if legs_with_25s:
+        st.markdown(
+            f"- **Zeitmuster:** ~25s bis DISCONNECT ist für folgende Legs belegbar: {', '.join(legs_with_25s)}."
+        )
+    else:
+        st.markdown("- **Zeitmuster:** Kein ~25s-DISCONNECT-Muster im analysierten Material.")
+
+    st.markdown(
+        "- **DECT-Stack (MAC/DLC/NWL):** DECT-Events werden nur zeitlich (±5s um SETUP/ALERTING) korreliert "
+        "und nicht als eigenständige Abbruchursache gewertet."
+    )
 
     with st.expander("Q.931-Rohzeilen (Beleg)", expanded=False):
         st.code("\n".join(analysis.q931_lines))
