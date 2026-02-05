@@ -6,7 +6,7 @@ import textwrap
 import zlib
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import plotly.express as px
@@ -127,6 +127,44 @@ class DtraceEntry:
     level: str
     component: Optional[str]
     message: str
+
+
+@dataclass
+class DtraceCallEvent:
+    timestamp_label: str
+    timestamp_seconds: Optional[float]
+    message_type: str
+    raw_line: str
+    calling_party: Optional[str] = None
+    called_party: Optional[str] = None
+    display: Optional[str] = None
+    progress_indicator: Optional[str] = None
+    bearer_capability: Optional[str] = None
+    cause: Optional[str] = None
+
+
+@dataclass
+class DtraceCallLeg:
+    leg_id: str
+    controller: str
+    call_ref: str
+    direction: str
+    events: List[DtraceCallEvent]
+
+
+@dataclass
+class DectCorrelationEvent:
+    timestamp_label: str
+    timestamp_seconds: Optional[float]
+    event_name: str
+    raw_line: str
+
+
+@dataclass
+class DtraceCallAnalysis:
+    q931_lines: List[str]
+    legs: List[DtraceCallLeg]
+    dect_events: List[DectCorrelationEvent]
 
 
 @dataclass
@@ -672,6 +710,172 @@ def parse_dtrace(text: str) -> List[DtraceEntry]:
         entries.append(parsed)
 
     return entries
+
+
+def parse_q931_relative_seconds(raw_line: str) -> Optional[float]:
+    match = re.search(r"\b(\d{2}:\d{2}:\d{2}:\d{2})\b", raw_line)
+    if not match:
+        return None
+    hours, minutes, seconds, frames = [int(part) for part in match.group(1).split(":")]
+    return float(hours * 3600 + minutes * 60 + seconds + frames / 100.0)
+
+
+def parse_q931_timestamp_label(raw_line: str) -> str:
+    match = re.search(r"\b(\d{2}:\d{2}:\d{2}:\d{2})\b", raw_line)
+    if match:
+        return match.group(1)
+    return "k.A."
+
+
+def normalize_q931_message_type(raw_line: str) -> Optional[str]:
+    line_upper = raw_line.upper()
+    candidates = [
+        "SETUP ACKNOWLEDGE",
+        "CALL PROCEEDING",
+        "RELEASE COMPLETE",
+        "DISCONNECT",
+        "ALERTING",
+        "INFORMATION",
+        "RELEASE",
+        "SETUP",
+    ]
+    for candidate in candidates:
+        if candidate in line_upper:
+            return candidate
+    return None
+
+
+def parse_dtrace_call_analysis(raw_text: str) -> DtraceCallAnalysis:
+    q931_lines: List[str] = []
+    legs: Dict[str, DtraceCallLeg] = {}
+    dect_events: List[DectCorrelationEvent] = []
+
+    current_leg_key: Optional[str] = None
+    current_message_type: Optional[str] = None
+
+    for raw_line in raw_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        q931_header = re.search(
+            r"Controller\s+(?P<controller>\d+).*?Call\s+reference\s+(?P<call_ref>[0-9A-Fa-f]+).*?\((?P<direction>from\s+originator|to\s+originator)\)",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if q931_header:
+            controller = q931_header.group("controller")
+            call_ref = q931_header.group("call_ref").upper()
+            direction = q931_header.group("direction").lower()
+            leg_key = f"Controller {controller} | CallRef {call_ref} | {direction}"
+            if leg_key not in legs:
+                legs[leg_key] = DtraceCallLeg(
+                    leg_id=leg_key,
+                    controller=controller,
+                    call_ref=call_ref,
+                    direction=direction,
+                    events=[],
+                )
+            current_leg_key = leg_key
+            q931_lines.append(raw_line)
+            current_message_type = None
+            continue
+
+        if "Protocol discriminator Q.931: 08" in stripped:
+            q931_lines.append(raw_line)
+            continue
+
+        message_type = normalize_q931_message_type(stripped)
+        if current_leg_key and message_type:
+            event = DtraceCallEvent(
+                timestamp_label=parse_q931_timestamp_label(raw_line),
+                timestamp_seconds=parse_q931_relative_seconds(raw_line),
+                message_type=message_type,
+                raw_line=raw_line,
+            )
+            legs[current_leg_key].events.append(event)
+            q931_lines.append(raw_line)
+            current_message_type = message_type
+            continue
+
+        if current_leg_key and legs[current_leg_key].events:
+            current_event = legs[current_leg_key].events[-1]
+            current_line_lower = stripped.lower()
+            if "calling party number" in current_line_lower:
+                current_event.calling_party = stripped
+                q931_lines.append(raw_line)
+                continue
+            if "called party number" in current_line_lower:
+                current_event.called_party = stripped
+                q931_lines.append(raw_line)
+                continue
+            if "display" in current_line_lower:
+                current_event.display = stripped
+                q931_lines.append(raw_line)
+                continue
+            if "progress indicator" in current_line_lower:
+                current_event.progress_indicator = stripped
+                q931_lines.append(raw_line)
+                continue
+            if "bearer capability" in current_line_lower:
+                current_event.bearer_capability = stripped
+                q931_lines.append(raw_line)
+                continue
+            if "cause" in current_line_lower and current_message_type in {"DISCONNECT", "RELEASE", "RELEASE COMPLETE"}:
+                current_event.cause = stripped
+                q931_lines.append(raw_line)
+                continue
+
+        if re.search(r"\b(MAC_PT|DLC|NWL|LCE_REQUEST_PAGE|CC_SETUP|CC_ALERTING)\b", stripped):
+            dect_events.append(
+                DectCorrelationEvent(
+                    timestamp_label=parse_q931_timestamp_label(raw_line),
+                    timestamp_seconds=parse_q931_relative_seconds(raw_line),
+                    event_name=stripped,
+                    raw_line=raw_line,
+                )
+            )
+
+    for leg in legs.values():
+        leg.events.sort(
+            key=lambda event: (
+                event.timestamp_seconds is None,
+                event.timestamp_seconds if event.timestamp_seconds is not None else float("inf"),
+            )
+        )
+
+    sorted_legs = sorted(
+        legs.values(),
+        key=lambda leg: (
+            leg.events[0].timestamp_seconds if leg.events and leg.events[0].timestamp_seconds is not None else float("inf"),
+            int(leg.controller),
+            leg.call_ref,
+            leg.direction,
+        ),
+    )
+
+    return DtraceCallAnalysis(
+        q931_lines=q931_lines,
+        legs=sorted_legs,
+        dect_events=dect_events,
+    )
+
+
+def format_relative_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "k.A."
+    if seconds < 0:
+        return f"-{format_relative_duration(abs(seconds))}"
+    minutes, rest = divmod(seconds, 60)
+    hours, minutes = divmod(int(minutes), 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{rest:05.2f}"
+    return f"{minutes:d}:{rest:05.2f}"
+
+
+def quote_line(line: str) -> str:
+    compact = re.sub(r"\s+", " ", line).strip()
+    return compact if len(compact) <= 220 else f"{compact[:217]}..."
 
 
 def extract_dtrace_section(text: str) -> str:
@@ -2418,164 +2622,164 @@ def render_events(events: List[EventEntry]) -> None:
 
 
 
-def render_dtrace(entries: List[DtraceEntry]) -> None:
-    st.subheader("DTrace Analyse")
-    if not entries:
-        st.info("Keine DTrace-Einträge gefunden.")
+def render_dtrace(raw_text: str) -> None:
+    st.subheader("dTrace Analyse (Q.931/DECT)")
+    analysis = parse_dtrace_call_analysis(raw_text)
+
+    if not analysis.q931_lines:
+        st.info("Im dtrace-Abschnitt wurden keine Q.931-Daten gefunden. Der Tab wird nur angezeigt, wenn der Abschnitt Daten enthält.")
         return
 
-    total_entries = len(entries)
-    error_count = sum(1 for entry in entries if entry.level in {"ERROR", "CRIT"})
-    warn_count = sum(1 for entry in entries if entry.level == "WARN")
-    unknown_count = sum(1 for entry in entries if entry.level == "UNBEKANNT")
-    criticality_score = min(100, round(((error_count * 3) + (warn_count * 1.5) + unknown_count) / max(total_entries, 1) * 20))
+    st.markdown("### A) Executive Summary")
+    call_leg_count = len(analysis.legs)
+    st.markdown(f"- **Anzahl Call-Legs:** {call_leg_count}")
 
-    timeline_rows = [
-        {"timestamp": entry.timestamp, "level": entry.level}
-        for entry in entries
-        if entry.timestamp is not None
-    ]
-    has_timeline = bool(timeline_rows)
-    first_seen = min((entry.timestamp for entry in entries if entry.timestamp is not None), default=None)
-    last_seen = max((entry.timestamp for entry in entries if entry.timestamp is not None), default=None)
+    has_25s_pattern = False
+    no_route_legs: List[str] = []
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Einträge", f"{total_entries}")
-    c2.metric("Fehler (ERROR/CRIT)", f"{error_count}")
-    c3.metric("Warnungen", f"{warn_count}")
-    c4.metric("Unbekanntes Format", f"{unknown_count}")
-    c5.metric("Kritikalität (0-100)", f"{criticality_score}")
+    for leg in analysis.legs:
+        start_event = leg.events[0] if leg.events else None
+        disconnect_event = next((event for event in leg.events if event.message_type == "DISCONNECT"), None)
+        release_complete_event = next((event for event in leg.events if event.message_type == "RELEASE COMPLETE"), None)
+        final_cause = disconnect_event.cause if disconnect_event and disconnect_event.cause else "nicht belegbar im Mitschnitt"
 
-    if first_seen and last_seen:
-        st.caption(f"Zeitraum: {first_seen:%Y-%m-%d %H:%M:%S} bis {last_seen:%Y-%m-%d %H:%M:%S}")
+        duration_to_disconnect: Optional[float] = None
+        duration_to_release_complete: Optional[float] = None
 
-    level_df = pd.DataFrame([{"Level": entry.level} for entry in entries])
-    level_count_df = level_df.value_counts("Level").reset_index(name="Anzahl")
-    level_count_df = level_count_df.sort_values("Anzahl", ascending=False)
-    level_count_df["Anteil %"] = (level_count_df["Anzahl"] / total_entries * 100).round(1)
-    level_fig = px.bar(
-        level_count_df,
-        x="Level",
-        y="Anzahl",
-        color="Level",
-        title="DTrace Log-Level Verteilung",
-        text="Anzahl",
-    )
-    level_fig.update_layout(showlegend=False)
-    st.plotly_chart(level_fig, use_container_width=True)
+        if start_event and disconnect_event and start_event.timestamp_seconds is not None and disconnect_event.timestamp_seconds is not None:
+            duration_to_disconnect = disconnect_event.timestamp_seconds - start_event.timestamp_seconds
+        if start_event and release_complete_event and start_event.timestamp_seconds is not None and release_complete_event.timestamp_seconds is not None:
+            duration_to_release_complete = release_complete_event.timestamp_seconds - start_event.timestamp_seconds
 
-    if has_timeline:
-        timeline_df = pd.DataFrame(timeline_rows)
-        timeline_df["minute"] = timeline_df["timestamp"].dt.floor("min")
-        timeline_agg = timeline_df.groupby(["minute", "level"]).size().reset_index(name="Anzahl")
-        per_minute = timeline_df.groupby("minute").size().reset_index(name="Events")
-        peak_row = per_minute.sort_values("Events", ascending=False).iloc[0]
+        if duration_to_disconnect is not None and 23.0 <= duration_to_disconnect <= 27.0:
+            has_25s_pattern = True
 
-        time_fig = px.line(
-            timeline_agg,
-            x="minute",
-            y="Anzahl",
-            color="level",
-            markers=True,
-            title="DTrace Ereignisse im Zeitverlauf (pro Minute)",
+        cause_text_lower = final_cause.lower()
+        if "no route to destination" in cause_text_lower:
+            no_route_legs.append(leg.leg_id)
+
+        start_label = start_event.timestamp_label if start_event else "k.A."
+        end_label = release_complete_event.timestamp_label if release_complete_event else (disconnect_event.timestamp_label if disconnect_event else "k.A.")
+
+        st.markdown(
+            f"- **{leg.leg_id}** – Start: {start_label}, Ende: {end_label}, "
+            f"Dauer bis DISCONNECT: {format_relative_duration(duration_to_disconnect)}, "
+            f"Dauer bis RELEASE COMPLETE: {format_relative_duration(duration_to_release_complete)}, "
+            f"Finaler Cause: {final_cause}"
         )
-        st.plotly_chart(time_fig, use_container_width=True)
-        st.caption(f"Peak-Last: {int(peak_row['Events'])} Events in Minute {peak_row['minute']:%Y-%m-%d %H:%M}")
+
+    legs_with_25s = [
+        leg.leg_id
+        for leg in analysis.legs
+        if leg.events
+        for start_event in [leg.events[0]]
+        for disconnect_event in [next((event for event in leg.events if event.message_type == "DISCONNECT"), None)]
+        if start_event
+        and disconnect_event
+        and start_event.timestamp_seconds is not None
+        and disconnect_event.timestamp_seconds is not None
+        and 23.0 <= (disconnect_event.timestamp_seconds - start_event.timestamp_seconds) <= 27.0
+    ]
+    if legs_with_25s:
+        st.markdown(f"- **~25s-Muster:** ja ({', '.join(legs_with_25s)})")
     else:
-        st.info("Keine Zeitstempel erkannt – Zeitverlaufsdiagramm nicht möglich.")
+        st.markdown("- **~25s-Muster:** nein")
 
-    component_summary_df = pd.DataFrame(
-        [
-            {
-                "Komponente": entry.component or "(ohne)",
-                "Level": entry.level,
-            }
-            for entry in entries
-        ]
-    )
-    component_agg = component_summary_df.groupby(["Komponente", "Level"]).size().reset_index(name="Anzahl")
-    noisy_components = (
-        component_agg[component_agg["Level"].isin(["WARN", "ERROR", "CRIT"])]
-        .groupby("Komponente")["Anzahl"]
-        .sum()
-        .reset_index(name="Problem-Events")
-        .sort_values("Problem-Events", ascending=False)
-        .head(10)
-    )
+    if no_route_legs:
+        st.markdown(f"- **Lokales Routing-Problem `No route to destination`:** ja ({', '.join(no_route_legs)})")
+    else:
+        st.markdown("- **Lokales Routing-Problem `No route to destination`:** nein")
 
-    component_rows = [
-        {"Komponente": entry.component or "(ohne)", "Level": entry.level}
-        for entry in entries
-        if entry.level in {"ERROR", "CRIT", "WARN"}
-    ]
-    if component_rows:
-        comp_df = pd.DataFrame(component_rows)
-        comp_count_df = comp_df.groupby(["Komponente", "Level"]).size().reset_index(name="Anzahl")
-        comp_fig = px.bar(
-            comp_count_df,
-            x="Komponente",
-            y="Anzahl",
-            color="Level",
-            barmode="stack",
-            title="Warnungen/Fehler nach Komponente",
-        )
-        st.plotly_chart(comp_fig, use_container_width=True)
+    st.markdown("### B) Detail pro Call-Leg")
+    if not analysis.legs:
+        st.info("Keine Call-Legs rekonstruierbar (Controller/CallRef/Richtung nicht eindeutig vorhanden).")
 
-    recurring_rows = [
-        {
-            "Level": entry.level,
-            "Komponente": entry.component or "(ohne)",
-            "Meldung": entry.message,
-        }
-        for entry in entries
-        if entry.message and entry.level in {"WARN", "ERROR", "CRIT"}
-    ]
-    if recurring_rows:
-        recurring_df = pd.DataFrame(recurring_rows)
-        recurring_agg = (
-            recurring_df.groupby(["Level", "Komponente", "Meldung"]).size().reset_index(name="Anzahl")
-            .sort_values("Anzahl", ascending=False)
-            .head(12)
-        )
-        recurring_agg["Meldung (gekürzt)"] = recurring_agg["Meldung"].apply(
-            lambda value: value if len(value) <= 110 else f"{value[:107]}..."
-        )
-        recurring_fig = px.bar(
-            recurring_agg,
-            x="Anzahl",
-            y="Meldung (gekürzt)",
-            color="Level",
-            orientation="h",
-            hover_data={"Komponente": True, "Meldung": True, "Anzahl": True},
-            title="Häufigste Warn-/Fehlermeldungen",
-        )
-        recurring_fig.update_layout(yaxis=dict(categoryorder="total ascending"))
-        st.plotly_chart(recurring_fig, use_container_width=True)
+    for leg in analysis.legs:
+        st.markdown(f"#### {leg.leg_id}")
+        timeline_lines: List[str] = []
+        for event in leg.events:
+            details = []
+            if event.calling_party:
+                details.append(event.calling_party)
+            if event.called_party:
+                details.append(event.called_party)
+            if event.display:
+                details.append(event.display)
+            if event.progress_indicator:
+                details.append(event.progress_indicator)
+            if event.bearer_capability:
+                details.append(event.bearer_capability)
+            if event.cause:
+                details.append(event.cause)
 
-    c_left, c_right = st.columns(2)
-    with c_left:
-        st.markdown("**Level-Zusammenfassung**")
-        st.dataframe(level_count_df, use_container_width=True, hide_index=True)
-    with c_right:
-        st.markdown("**Auffällige Komponenten (WARN/ERROR/CRIT)**")
-        if noisy_components.empty:
-            st.info("Keine problematischen Komponenten erkannt.")
+            details_text = " | ".join(details) if details else "keine Zusatzfelder"
+            timeline_lines.append(f"- {event.timestamp_label} – {event.message_type} – {details_text}")
+
+        if timeline_lines:
+            st.markdown("\n".join(timeline_lines))
         else:
-            st.dataframe(noisy_components, use_container_width=True, hide_index=True)
+            st.markdown("- Keine Q.931-Nachrichten für dieses Leg erfasst.")
 
-    table_df = pd.DataFrame(
-        [
-            {
-                "Zeit": entry.timestamp.strftime("%Y-%m-%d %H:%M:%S") if entry.timestamp else "k.A.",
-                "Level": entry.level,
-                "Komponente": entry.component or "k.A.",
-                "Meldung": entry.message,
-                "Raw": entry.raw_line,
-            }
-            for entry in entries
-        ]
-    )
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
+        final_event = next(
+            (event for event in reversed(leg.events) if event.message_type in {"DISCONNECT", "RELEASE", "RELEASE COMPLETE"}),
+            None,
+        )
+        if final_event and final_event.cause:
+            st.markdown("**Finaler DISCONNECT/RELEASE Cause (Logzitat):**")
+            st.code(f"{quote_line(final_event.raw_line)}\n{quote_line(final_event.cause)}")
+        else:
+            st.markdown("**Finaler DISCONNECT/RELEASE Cause:** nicht belegbar im Mitschnitt.")
+
+        correlated: List[Tuple[float, DectCorrelationEvent]] = []
+        if leg.events:
+            setup_alerting_times = [
+                event.timestamp_seconds
+                for event in leg.events
+                if event.message_type in {"SETUP", "ALERTING"} and event.timestamp_seconds is not None
+            ]
+            for dect_event in analysis.dect_events:
+                if dect_event.timestamp_seconds is None:
+                    continue
+                if not setup_alerting_times:
+                    continue
+                closest = min(abs(dect_event.timestamp_seconds - value) for value in setup_alerting_times)
+                if closest <= 5.0:
+                    correlated.append((closest, dect_event))
+
+        if correlated:
+            correlated.sort(key=lambda item: item[0])
+            st.markdown("**DECT-Korrelation (±5s, nur Korrelation):**")
+            for delta, dect_event in correlated[:6]:
+                st.markdown(
+                    f"- {dect_event.timestamp_label} – {dect_event.event_name} "
+                    f"(korreliert, zeitlicher Abstand {delta:.2f}s)"
+                )
+
+    st.markdown("### C) Findings & Nächste Checks")
+    if has_25s_pattern:
+        st.markdown(
+            "- Für Legs mit ~25s bis DISCONNECT ist eine providerseitige Umleitung nach Zeit (Sprachbox/Mailbox) "
+            "eine **plausible** Erklärung. Bitte Rufumleitungen / Weiterleitung nach Zeit im Anschluss prüfen."
+        )
+    else:
+        st.markdown("- Kein ~25s-Muster belegbar im Mitschnitt.")
+
+    if no_route_legs:
+        st.markdown(
+            "- Für Legs mit `No route to destination` sollten interne Zielzuordnung, Rufgruppe, Parallelruf-Ziele und "
+            "Erreichbarkeit der Nebenstellen geprüft werden."
+        )
+    else:
+        st.markdown("- Kein `No route to destination` im ausgewerteten Q.931-Material erkannt.")
+
+    if call_leg_count > 1:
+        st.markdown(
+            "- Parallele Legs erkannt. Welcher Leg Hauptcall vs. Neben-/Gruppenleg ist, wird nur genannt, wenn klar aus "
+            "Call-Flow und Cause ableitbar; sonst: nicht belegbar im Mitschnitt."
+        )
+
+    with st.expander("Q.931-Rohzeilen (Beleg)", expanded=False):
+        st.code("\n".join(analysis.q931_lines))
 
 def render_dect_devices(devices: List[DectDevice]) -> None:
     st.subheader("DECTDeviceInfo")
@@ -2714,7 +2918,7 @@ def build_dashboard(text: str) -> None:
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
     dtrace_text = extract_dtrace_section(text)
-    dtrace_entries = parse_dtrace(dtrace_text) if dtrace_text else []
+    has_dtrace_data = bool(dtrace_text.strip())
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -2743,8 +2947,8 @@ def build_dashboard(text: str) -> None:
     )
 
     tab_names = [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "DECT", "Events"]
-    if dtrace_entries:
-        tab_names.append("DTrace")
+    if has_dtrace_data:
+        tab_names.append("dTrace")
     tabs = st.tabs(tab_names)
     tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_dect, tab_events = tabs[:7]
     with tab_dsl:
@@ -2780,9 +2984,9 @@ def build_dashboard(text: str) -> None:
     with tab_events:
         render_events(events)
 
-    if dtrace_entries:
+    if has_dtrace_data:
         with tabs[7]:
-            render_dtrace(dtrace_entries)
+            render_dtrace(dtrace_text)
 
 
 def _is_running_with_streamlit() -> bool:
