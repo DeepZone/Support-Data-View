@@ -1,4 +1,5 @@
 import base64
+import json
 import html
 import re
 import sys
@@ -117,6 +118,13 @@ class EventEntry:
     date: str
     time: str
     message: str
+
+
+@dataclass
+class MeshTopology:
+    nodes: List[dict]
+    links: List[dict]
+    error: Optional[str] = None
 
 
 @dataclass
@@ -559,6 +567,109 @@ def parse_events(text: str) -> List[EventEntry]:
             continue
         entries.append(EventEntry(date=match.group(1), time=match.group(2), message=match.group(3)))
     return entries
+
+
+def parse_mesh_topology(text: str) -> MeshTopology:
+    section = extract_section_by_prefix(text, "##### BEGIN SECTION MESH daemon")
+    if not section:
+        return MeshTopology(nodes=[], links=[])
+
+    dump_match = re.search(
+        r"===== Mesh Topology Dump Begin =====\s*(\{.*?\})\s*===== Mesh Topology Dump End =====",
+        section,
+        re.DOTALL,
+    )
+    if not dump_match:
+        return MeshTopology(nodes=[], links=[], error="Mesh-Topologie-Dump nicht gefunden.")
+
+    try:
+        payload = json.loads(dump_match.group(1))
+    except json.JSONDecodeError as exc:
+        return MeshTopology(nodes=[], links=[], error=f"Mesh-Topologie konnte nicht gelesen werden: {exc.msg}")
+
+    nodes = payload.get("nodes") or []
+    links_by_uid: Dict[str, dict] = {}
+    for node in nodes:
+        node_uid = node.get("uid")
+        for interface in node.get("node_interfaces") or []:
+            for link in interface.get("node_links") or []:
+                link_uid = link.get("uid")
+                if not link_uid:
+                    continue
+                links_by_uid.setdefault(
+                    link_uid,
+                    {
+                        "uid": link_uid,
+                        "type": link.get("type"),
+                        "state": link.get("state"),
+                        "node_1_uid": link.get("node_1_uid") or node_uid,
+                        "node_2_uid": link.get("node_2_uid"),
+                        "cur_data_rate_rx": link.get("cur_data_rate_rx"),
+                        "cur_data_rate_tx": link.get("cur_data_rate_tx"),
+                    },
+                )
+
+    return MeshTopology(nodes=nodes, links=list(links_by_uid.values()))
+
+
+def build_mesh_positions(mesh: MeshTopology) -> Dict[str, Tuple[float, float]]:
+    nodes_by_uid = {node.get("uid"): node for node in mesh.nodes if node.get("uid")}
+    links = [
+        link for link in mesh.links if link.get("node_1_uid") in nodes_by_uid and link.get("node_2_uid") in nodes_by_uid
+    ]
+
+    def _is_infra(node: dict) -> bool:
+        role = (node.get("mesh_role") or "").lower()
+        capabilities = set(node.get("device_capabilities") or [])
+        return role in {"master", "slave"} or "ROUTER" in capabilities or "WLAN_ACCESS_POINT" in capabilities
+
+    master_uid = next(
+        (node.get("uid") for node in mesh.nodes if (node.get("mesh_role") or "").lower() == "master"),
+        None,
+    )
+    infra_uids = [uid for uid, node in nodes_by_uid.items() if _is_infra(node)]
+    if master_uid and master_uid in infra_uids:
+        infra_uids = [master_uid] + [uid for uid in infra_uids if uid != master_uid]
+    elif master_uid:
+        infra_uids = [master_uid] + infra_uids
+
+    client_uids = [uid for uid in nodes_by_uid.keys() if uid not in set(infra_uids)]
+
+    positions: Dict[str, Tuple[float, float]] = {}
+    infra_spacing = 5.0
+    for index, uid in enumerate(infra_uids):
+        positions[uid] = (index * infra_spacing, 0.0)
+
+    client_by_parent: Dict[str, List[str]] = {uid: [] for uid in infra_uids}
+    fallback_clients: List[str] = []
+    for client_uid in client_uids:
+        parent_uid = None
+        for link in links:
+            node_1 = link.get("node_1_uid")
+            node_2 = link.get("node_2_uid")
+            if client_uid == node_1 and node_2 in client_by_parent:
+                parent_uid = node_2
+                break
+            if client_uid == node_2 and node_1 in client_by_parent:
+                parent_uid = node_1
+                break
+        if parent_uid:
+            client_by_parent[parent_uid].append(client_uid)
+        else:
+            fallback_clients.append(client_uid)
+
+    for parent_uid, assigned_clients in client_by_parent.items():
+        parent_x, _ = positions[parent_uid]
+        for index, client_uid in enumerate(assigned_clients):
+            row = index // 4
+            column = index % 4
+            offset_x = (column - 1.5) * 1.7
+            positions[client_uid] = (parent_x + offset_x, -2.3 - (row * 2.0))
+
+    for index, client_uid in enumerate(fallback_clients):
+        positions[client_uid] = (index * 2.0, -8.0)
+
+    return positions
 
 
 
@@ -2287,6 +2398,119 @@ def render_events(events: List[EventEntry]) -> None:
     st.dataframe(df, use_container_width=True)
 
 
+def render_mesh_topology(mesh: MeshTopology) -> None:
+    st.subheader("Mesh Topologie")
+    if mesh.error:
+        st.warning(mesh.error)
+    if not mesh.nodes:
+        st.info("Keine Mesh-Topologie gefunden.")
+        return
+
+    positions = build_mesh_positions(mesh)
+    nodes_by_uid = {node.get("uid"): node for node in mesh.nodes if node.get("uid")}
+
+    edge_x: List[float] = []
+    edge_y: List[float] = []
+    for link in mesh.links:
+        node_1_uid = link.get("node_1_uid")
+        node_2_uid = link.get("node_2_uid")
+        if node_1_uid not in positions or node_2_uid not in positions:
+            continue
+        x0, y0 = positions[node_1_uid]
+        x1, y1 = positions[node_2_uid]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        mode="lines",
+        hoverinfo="none",
+        line=dict(width=1.8, color="#8b8f97"),
+        showlegend=False,
+    )
+
+    infra_x: List[float] = []
+    infra_y: List[float] = []
+    infra_text: List[str] = []
+    infra_hover: List[str] = []
+    client_x: List[float] = []
+    client_y: List[float] = []
+    client_text: List[str] = []
+    client_hover: List[str] = []
+
+    for uid, (x, y) in positions.items():
+        node = nodes_by_uid.get(uid, {})
+        name = node.get("device_friendly_name") or node.get("device_name") or uid
+        node_type = node.get("device_type") or "Gerät"
+        role = (node.get("mesh_role") or "").lower()
+        capabilities = set(node.get("device_capabilities") or [])
+        is_infra = role in {"master", "slave"} or "ROUTER" in capabilities or "WLAN_ACCESS_POINT" in capabilities
+        if role == "master":
+            role_label = "Master"
+        elif role == "slave":
+            role_label = "Repeater"
+        else:
+            role_label = "Client"
+        hover_lines = [
+            f"<b>{html.escape(name)}</b>",
+            f"Rolle: {role_label}",
+            f"Typ: {html.escape(node_type)}",
+            f"MAC: {html.escape(node.get('device_mac_address') or 'k.A.')}",
+        ]
+        if is_infra:
+            infra_x.append(x)
+            infra_y.append(y)
+            infra_text.append(name)
+            infra_hover.append("<br>".join(hover_lines))
+        else:
+            client_x.append(x)
+            client_y.append(y)
+            client_text.append(name)
+            client_hover.append("<br>".join(hover_lines))
+
+    infra_trace = go.Scatter(
+        x=infra_x,
+        y=infra_y,
+        mode="markers+text",
+        text=infra_text,
+        textposition="top center",
+        textfont=dict(size=12),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=infra_hover,
+        marker=dict(size=38, color="#1f77b4", line=dict(width=2, color="#ffffff"), symbol="square"),
+        name="Mesh Infrastruktur",
+    )
+
+    client_trace = go.Scatter(
+        x=client_x,
+        y=client_y,
+        mode="markers+text",
+        text=client_text,
+        textposition="bottom center",
+        textfont=dict(size=11),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=client_hover,
+        marker=dict(size=24, color="#2ca02c", line=dict(width=1.5, color="#ffffff"), symbol="circle"),
+        name="Clients",
+    )
+
+    fig = go.Figure(data=[edge_trace, infra_trace, client_trace])
+    fig.update_layout(
+        title="Mesh Netzwerk-Topologie",
+        title_x=0.5,
+        margin=dict(l=20, r=20, t=60, b=20),
+        plot_bgcolor="rgba(0,0,0,0)",
+        height=max(520, 360 + (len(client_x) // 4) * 40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Darstellung ohne überlappende Clients: Infrastruktur oben, Clients pro Uplink in geordneten Reihen darunter.")
+
+
 
 
 def render_dect_devices(devices: List[DectDevice]) -> None:
@@ -2339,6 +2563,7 @@ def parse_support_data(text: str) -> dict:
         "voip_accounts": parse_voip_accounts(text),
         "neighbour_clients": parse_neighbour_clients(text),
         "events": parse_events(text),
+        "mesh_topology": parse_mesh_topology(text),
         "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
     }
@@ -2423,6 +2648,7 @@ def build_dashboard(text: str) -> None:
     voip_accounts = parsed["voip_accounts"]
     neighbour_clients = parsed["neighbour_clients"]
     events = parsed["events"]
+    mesh_topology = parsed["mesh_topology"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
 
@@ -2452,9 +2678,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Telefonie", "DECT", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Mesh", "Telefonie", "DECT", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_phone, tab_dect, tab_events = tabs[:7]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_mesh, tab_phone, tab_dect, tab_events = tabs[:8]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -2477,6 +2703,9 @@ def build_dashboard(text: str) -> None:
         render_wlan_noisefloor(noisefloor_entries)
         render_wlan_clients(stations)
         render_wlan_radio_load(radio_loads)
+
+    with tab_mesh:
+        render_mesh_topology(mesh_topology)
 
     with tab_phone:
         render_telephony(voip_accounts)
