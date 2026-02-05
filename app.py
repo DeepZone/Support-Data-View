@@ -147,6 +147,39 @@ class DectDevice:
     fw_version: Optional[str]
 
 
+DECT_RSSI_INDEX_TO_DBM = {
+    1: -92.7,
+    2: -94.9,
+    3: -92.7,
+    4: -79.7,
+    5: -45.1,
+    6: -75.4,
+    7: -92.7,
+    8: -90.5,
+    9: -73.2,
+    10: -38.6,
+}
+
+
+DECT_MODEL_NAMES = {
+    "0": "Fremdgerät",
+    "1": "FRITZ!Fon MT-D",
+    "2": "Speedphone (MT-D OEM Gerät für die Telekom)",
+    "3": "FRITZ!Fon MT-F",
+    "3.1": "FRITZ!Fon MT-F",
+    "4": "FRITZ!Fon C3",
+    "5": "FRITZ!Fon M2",
+    "5.1": "FRITZ!Fon M2",
+    "8": "FRITZ!Fon C4",
+    "8.1": "FRITZ!Fon C4",
+    "8.2": "FRITZ!Fon C5",
+    "8.3": "FRITZ!Fon C6",
+    "8.4": "FRITZ!Fon X6",
+    "12.1": "FRITZ!Fon M3",
+    "213": "FRITZ!Fon MT-C (eigentlich Swisscom-Gerät)",
+}
+
+
 def format_radio_label(radio_id: int) -> str:
     band = RADIO_BAND_LABELS.get(radio_id)
     if band:
@@ -512,6 +545,24 @@ def parse_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def parse_dect_rssi_value(value: str) -> Optional[float]:
+    parsed_value = parse_float(value)
+    if parsed_value is None:
+        return None
+    mapped_value = DECT_RSSI_INDEX_TO_DBM.get(int(parsed_value)) if parsed_value.is_integer() else None
+    return mapped_value if mapped_value is not None else parsed_value
+
+
+def parse_dect_model(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    model_key = value.strip()
+    if not model_key:
+        return None
+    model_name = DECT_MODEL_NAMES.get(model_key)
+    return f"{model_name} ({model_key})" if model_name else model_key
+
+
 def parse_dect_device_info(text: str) -> List[DectDevice]:
     section = extract_section_by_prefix(text, "##### BEGIN SECTION DECTDeviceInfo")
     if not section:
@@ -537,20 +588,20 @@ def parse_dect_device_info(text: str) -> List[DectDevice]:
         if len(values1) < 29:
             continue
 
-        rssi_values = [v for v in values1[28:38] if v and v != "-"]
-        hg_rssi_values = [v for v in values2[13:23] if v and v != "-"] if len(values2) >= 23 else []
+        rssi_values = [parse_dect_rssi_value(v) for v in values1[28:38] if v and v != "-"]
+        hg_rssi_values = [parse_dect_rssi_value(v) for v in values2[13:23] if v and v != "-"] if len(values2) >= 23 else []
 
         devices.append(
             DectDevice(
                 name=values1[0],
                 hgid=parse_int(values1[2]),
-                model=values1[3] or None,
+                model=parse_dect_model(values1[3]),
                 ipui=values1[5] or None,
                 curr_codec=values1[7] or None,
                 ber=parse_float(values1[27]),
-                rssi_values=[float(v) for v in rssi_values],
+                rssi_values=[v for v in rssi_values if v is not None],
                 hg_ber=parse_float(values2[12]) if len(values2) >= 13 else None,
-                hg_rssi_values=[float(v) for v in hg_rssi_values],
+                hg_rssi_values=[v for v in hg_rssi_values if v is not None],
                 no_emission=parse_int(values2[23]) if len(values2) >= 24 else None,
                 fw_version=values2[24] if len(values2) >= 25 and values2[24] else None,
             )
