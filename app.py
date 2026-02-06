@@ -224,6 +224,9 @@ class Ar7DslIface:
     dsl_interface_name: Optional[str]
     stackmode: Optional[str]
     weight: Optional[str]
+    vlan_encap: Optional[str]
+    vlan_id: Optional[str]
+    vlan_prio: Optional[str]
 
 
 @dataclass
@@ -1280,6 +1283,8 @@ def parse_ar7_overview(text: str) -> Ar7Overview:
 
     dsl_ifaces = []
     for block in _extract_named_blocks(ar7cfg_body, "dslifaces"):
+        vlan_blocks = _extract_named_blocks(block, "vlancfg")
+        vlan_block = vlan_blocks[0] if vlan_blocks else ""
         dsl_ifaces.append(
             Ar7DslIface(
                 name=_find_block_value(block, "name"),
@@ -1288,6 +1293,9 @@ def parse_ar7_overview(text: str) -> Ar7Overview:
                 dsl_interface_name=_find_block_value(block, "dslinterfacename"),
                 stackmode=_find_block_value(block, "stackmode"),
                 weight=_find_block_value(block, "weight"),
+                vlan_encap=_find_block_value(vlan_block, "vlanencap"),
+                vlan_id=_find_block_value(vlan_block, "vlanid"),
+                vlan_prio=_find_block_value(vlan_block, "vlanprio"),
             )
         )
 
@@ -2788,6 +2796,9 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                     "DSL Interface": entry.dsl_interface_name or "k.A.",
                     "Stackmode": entry.stackmode or "k.A.",
                     "Gewicht": entry.weight or "k.A.",
+                    "VLAN Encapsulation": entry.vlan_encap or "k.A.",
+                    "VLAN ID": entry.vlan_id or "k.A.",
+                    "VLAN Priorität": entry.vlan_prio or "k.A.",
                 }
                 for entry in ar7_overview.dsl_ifaces
             ]
