@@ -194,6 +194,38 @@ class Ar7Interface:
 
 
 @dataclass
+class Ar7BridgeInterface:
+    name: Optional[str]
+    ipaddr: Optional[str]
+    netmask: Optional[str]
+    dhcp_start: Optional[str]
+    dhcp_end: Optional[str]
+
+
+@dataclass
+class Ar7VccEntry:
+    vpi: Optional[str]
+    vci: Optional[str]
+    dsl_encap: Optional[str]
+
+
+@dataclass
+class Ar7VlanEntry:
+    vlanid: Optional[str]
+    vlanprio: Optional[str]
+    tos: Optional[str]
+
+
+@dataclass
+class Ar7Overview:
+    mode: Optional[str]
+    active_provider: Optional[str]
+    bridge_interfaces: List[Ar7BridgeInterface]
+    vccs: List[Ar7VccEntry]
+    vlans: List[Ar7VlanEntry]
+
+
+@dataclass
 class Ar7NetworkSettings:
     mode: Optional[str]
     ipv4_mode: Optional[str]
@@ -1149,6 +1181,98 @@ def _extract_hidden_menus(ar7cfg_body: str) -> List[str]:
         if value and value.lower() == "no":
             visible.append(label)
     return visible
+
+
+def _extract_named_blocks(text: str, block_name: str) -> List[str]:
+    blocks = []
+    pattern = re.compile(rf"{re.escape(block_name)}\s*\{{")
+    for match in pattern.finditer(text):
+        start = match.end() - 1
+        brace_level = 0
+        for index in range(start, len(text)):
+            char = text[index]
+            if char == "{":
+                brace_level += 1
+            elif char == "}":
+                brace_level -= 1
+                if brace_level == 0:
+                    blocks.append(text[start + 1:index])
+                    break
+    return blocks
+
+
+def _dsl_encap_label(raw_value: Optional[str]) -> Optional[str]:
+    if not raw_value:
+        return None
+    normalized = raw_value.strip().lower()
+    mapping = {
+        "dslencap_ether": "DHCP",
+        "dslencap_pppoe": "PPPoE",
+    }
+    return mapping.get(normalized, raw_value)
+
+
+def parse_ar7_overview(text: str) -> Ar7Overview:
+    ar7cfg_body = _extract_ar7cfg_body(text)
+    if not ar7cfg_body:
+        return Ar7Overview(
+            mode=None,
+            active_provider=None,
+            bridge_interfaces=[],
+            vccs=[],
+            vlans=[],
+        )
+
+    bridge_interfaces = []
+    for block in _extract_named_blocks(ar7cfg_body, "brinterfaces"):
+        bridge_interfaces.append(
+            Ar7BridgeInterface(
+                name=_find_block_value(block, "name"),
+                ipaddr=_find_block_value(block, "ipaddr"),
+                netmask=_find_block_value(block, "netmask"),
+                dhcp_start=_find_block_value(block, "dhcpstart"),
+                dhcp_end=_find_block_value(block, "dhcpend"),
+            )
+        )
+
+    vccs = []
+    vccs_blocks = _extract_named_blocks(ar7cfg_body, "vccs")
+    vccs_body = vccs_blocks[0] if vccs_blocks else ""
+    for block in _extract_named_blocks(vccs_body, "vcc"):
+        vccs.append(
+            Ar7VccEntry(
+                vpi=_find_block_value(block, "vpi"),
+                vci=_find_block_value(block, "vci"),
+                dsl_encap=_dsl_encap_label(_find_block_value(block, "dsl_encap")),
+            )
+        )
+
+    vlans = []
+    vlancfg_blocks = _extract_named_blocks(ar7cfg_body, "vlancfg")
+    vlancfg_body = vlancfg_blocks[0] if vlancfg_blocks else ""
+    vlan_blocks = _extract_named_blocks(vlancfg_body, "vlan")
+    if not vlan_blocks and vlancfg_body:
+        vlan_blocks = [vlancfg_body]
+    for block in vlan_blocks:
+        vlanid = _find_block_value(block, "vlanid")
+        vlanprio = _find_block_value(block, "vlanprio")
+        tos = _find_block_value(block, "tos")
+        if any([vlanid, vlanprio, tos]):
+            vlans.append(
+                Ar7VlanEntry(
+                    vlanid=vlanid,
+                    vlanprio=vlanprio,
+                    tos=tos,
+                )
+            )
+
+    return Ar7Overview(
+        mode=_find_block_value(ar7cfg_body, "mode"),
+        active_provider=_find_block_value(ar7cfg_body, "active_provider"),
+        bridge_interfaces=bridge_interfaces,
+        vccs=vccs,
+        vlans=vlans,
+    )
 
 
 def parse_ar7_network_settings(text: str) -> Ar7NetworkSettings:
@@ -2616,6 +2740,75 @@ def render_port_forwardings(forwardings: List[PortForwarding]) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
+    st.subheader("AR7-Konfiguration")
+    if not ar7_overview.mode:
+        st.info("Keine AR7-Konfigurationsdaten gefunden.")
+        return
+
+    mode_label = _mode_label(ar7_overview.mode)
+    st.markdown(f"**Betriebsart:** {mode_label} (`{ar7_overview.mode}`)")
+
+    if ar7_overview.mode == "dsldmode_full_bridge":
+        st.markdown("**Bridge-Interfaces (brinterfaces)**")
+        if not ar7_overview.bridge_interfaces:
+            st.info("Keine Bridge-Interfaces gefunden.")
+        else:
+            df = pd.DataFrame(
+                [
+                    {
+                        "Name": entry.name or "k.A.",
+                        "IP-Adresse": entry.ipaddr or "k.A.",
+                        "Netzmaske": entry.netmask or "k.A.",
+                        "DHCP Start": entry.dhcp_start or "k.A.",
+                        "DHCP Ende": entry.dhcp_end or "k.A.",
+                    }
+                    for entry in ar7_overview.bridge_interfaces
+                ]
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        return
+
+    if ar7_overview.mode == "dsldmode_router":
+        active_provider = ar7_overview.active_provider or "k.A."
+        st.markdown(f"**Active Provider:** {active_provider}")
+
+        st.markdown("**VCCS (VPI/VCI, Encapsulation)**")
+        if not ar7_overview.vccs:
+            st.info("Keine VCCS-Einträge gefunden.")
+        else:
+            df = pd.DataFrame(
+                [
+                    {
+                        "VPI": entry.vpi or "k.A.",
+                        "VCI": entry.vci or "k.A.",
+                        "DSL Encapsulation": entry.dsl_encap or "k.A.",
+                    }
+                    for entry in ar7_overview.vccs
+                ]
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+        st.markdown("**VLAN-Konfiguration**")
+        if not ar7_overview.vlans:
+            st.info("Keine VLAN-Einträge gefunden.")
+        else:
+            df = pd.DataFrame(
+                [
+                    {
+                        "VLAN ID": entry.vlanid or "k.A.",
+                        "VLAN Priorität": entry.vlanprio or "k.A.",
+                        "TOS": entry.tos or "k.A.",
+                    }
+                    for entry in ar7_overview.vlans
+                ]
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        return
+
+    st.info("AR7-Modus ist nicht ausgewertet.")
+
+
 
 def _cidr_from_netmask(netmask: Optional[str]) -> str:
     if not netmask:
@@ -2965,6 +3158,7 @@ def parse_support_data(text: str) -> dict:
         "internet_connection": parse_internet_connection(text),
         "port_forwardings": parse_port_forwardings(text),
         "ar7_network_settings": parse_ar7_network_settings(text),
+        "ar7_overview": parse_ar7_overview(text),
         "networks": parse_wlan_env_scan(text),
         "stations": parse_wlan_stations(text),
         "radio_loads": parse_wlan_radio_load(text),
@@ -3050,7 +3244,7 @@ def build_dashboard(text: str) -> None:
     fiber_data = parsed["fiber_data"]
     internet_connection = parsed["internet_connection"]
     port_forwardings = parsed["port_forwardings"]
-    ar7_network_settings = parsed["ar7_network_settings"]
+    ar7_overview = parsed["ar7_overview"]
     networks = parsed["networks"]
     stations = parsed["stations"]
     radio_loads = parsed["radio_loads"]
@@ -3089,9 +3283,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Mesh", "Telefonie", "DECT", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_mesh, tab_phone, tab_dect, tab_events = tabs[:8]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:9]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -3124,6 +3318,9 @@ def build_dashboard(text: str) -> None:
     with tab_dect:
         render_dect_basis_info(dect_basis_info)
         render_dect_devices(dect_devices)
+
+    with tab_ar7:
+        render_ar7_overview(ar7_overview)
 
     with tab_events:
         render_events(events)
