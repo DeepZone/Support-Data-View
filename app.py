@@ -3077,6 +3077,18 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                     const saved = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
 
                     const nodeMap = new Map();
+                    const animatedNodes = [];
+                    const fritzIcon = `
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style="margin-right:6px;vertical-align:middle;">
+                            <rect x="2.5" y="8" width="19" height="10.5" rx="2.5" fill="rgba(255,255,255,0.25)"></rect>
+                            <path d="M7 8c0-2.8 2.2-5 5-5s5 2.2 5 5" stroke="white" stroke-width="1.6" stroke-linecap="round"></path>
+                            <path d="M9 8c0-1.7 1.3-3 3-3s3 1.3 3 3" stroke="white" stroke-width="1.6" stroke-linecap="round"></path>
+                            <circle cx="8" cy="15" r="1.2" fill="white"></circle>
+                            <circle cx="12" cy="15" r="1.2" fill="white"></circle>
+                            <circle cx="16" cy="15" r="1.2" fill="white"></circle>
+                        </svg>
+                    `;
+
                     payload.nodes.forEach(node => {{
                         const div = document.createElement('div');
                         const persisted = saved[node.uid];
@@ -3084,6 +3096,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                         const nodeY = persisted && Number.isFinite(persisted.y) ? persisted.y : node.y;
                         div.dataset.uid = node.uid;
                         div.dataset.type = node.type;
+                        div.dataset.dragging = 'false';
                         div.style.position = 'absolute';
                         div.style.left = `${{nodeX}}px`;
                         div.style.top = `${{nodeY}}px`;
@@ -3097,21 +3110,34 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                         div.style.border = '1px solid #ffffff';
                         div.style.background = node.type === 'infra' ? '#1f77b4' : '#2ca02c';
                         div.style.color = '#ffffff';
-                        div.innerText = `${{node.name}} · ${{node.role}}`;
+                        if (node.type === 'infra') {{
+                            div.innerHTML = `${{fritzIcon}}<span>${{node.name}}</span><span style="opacity:0.85;margin-left:6px;">${{node.role}}</span>`;
+                        }} else {{
+                            div.innerText = `${{node.name}}`;
+                        }}
                         wrapper.appendChild(div);
                         nodeMap.set(node.uid, div);
+                        animatedNodes.push({{
+                            uid: node.uid,
+                            div,
+                            phase: Math.random() * Math.PI * 2,
+                            drift: node.type === 'infra' ? 2.5 : 4.0,
+                        }});
                     }});
 
                     const drawLinks = () => {{
                         svg.innerHTML = '';
+                        const wrapperRect = wrapper.getBoundingClientRect();
                         payload.links.forEach(link => {{
                             const source = nodeMap.get(link.source);
                             const target = nodeMap.get(link.target);
                             if (!source || !target) return;
-                            const x1 = source.offsetLeft + source.offsetWidth / 2;
-                            const y1 = source.offsetTop + source.offsetHeight / 2;
-                            const x2 = target.offsetLeft + target.offsetWidth / 2;
-                            const y2 = target.offsetTop + target.offsetHeight / 2;
+                            const sourceRect = source.getBoundingClientRect();
+                            const targetRect = target.getBoundingClientRect();
+                            const x1 = sourceRect.left - wrapperRect.left + sourceRect.width / 2;
+                            const y1 = sourceRect.top - wrapperRect.top + sourceRect.height / 2;
+                            const x2 = targetRect.left - wrapperRect.left + targetRect.width / 2;
+                            const y2 = targetRect.top - wrapperRect.top + targetRect.height / 2;
                             const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
                             line.setAttribute('x1', x1);
                             line.setAttribute('y1', y1);
@@ -3147,6 +3173,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                             if (!dragging) return;
                             dragging = false;
                             nodeDiv.style.cursor = 'grab';
+                            nodeDiv.dataset.dragging = 'false';
                             const latest = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
                             latest[uid] = {{ x: parseFloat(nodeDiv.style.left), y: parseFloat(nodeDiv.style.top) }};
                             localStorage.setItem(storageKey, JSON.stringify(latest));
@@ -3159,12 +3186,30 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
                             startX = event.clientX;
                             startY = event.clientY;
                             nodeDiv.style.cursor = 'grabbing';
+                            nodeDiv.dataset.dragging = 'true';
+                            nodeDiv.style.transform = 'translate(0px, 0px)';
                             window.addEventListener('pointermove', onPointerMove);
                             window.addEventListener('pointerup', onPointerUp);
                         }});
                     }});
 
-                    drawLinks();
+                    const animateMesh = (time) => {{
+                        animatedNodes.forEach(item => {{
+                            if (item.div.dataset.dragging === 'true') return;
+                            const offsetX = Math.sin(time / 1600 + item.phase) * item.drift;
+                            const offsetY = Math.cos(time / 1900 + item.phase) * item.drift;
+                            item.div.style.transform = `translate(${{offsetX}}px, ${{offsetY}}px)`;
+                        }});
+                        drawLinks();
+                        window.requestAnimationFrame(animateMesh);
+                    }};
+
+                    window.requestAnimationFrame(() => {{
+                        window.requestAnimationFrame(drawLinks);
+                    }});
+
+                    window.requestAnimationFrame(animateMesh);
+                    window.addEventListener('resize', () => drawLinks());
                 </script>
                 """,
                 height=480,
