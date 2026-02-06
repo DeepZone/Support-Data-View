@@ -3089,9 +3089,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Netzwerkeinstellungen", "Mesh", "Telefonie", "DECT", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Mesh", "Telefonie", "DECT", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_network_settings, tab_mesh, tab_phone, tab_dect, tab_events = tabs[:9]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_mesh, tab_phone, tab_dect, tab_events = tabs[:8]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -3114,9 +3114,6 @@ def build_dashboard(text: str) -> None:
         render_wlan_noisefloor(noisefloor_entries)
         render_wlan_clients(stations)
         render_wlan_radio_load(radio_loads)
-
-    with tab_network_settings:
-        render_network_settings(ar7_network_settings)
 
     with tab_mesh:
         render_mesh_topology(mesh_topology)
