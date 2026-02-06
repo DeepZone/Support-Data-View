@@ -217,12 +217,23 @@ class Ar7VlanEntry:
 
 
 @dataclass
+class Ar7DslIface:
+    name: Optional[str]
+    enabled: Optional[str]
+    dsl_encap: Optional[str]
+    dsl_interface_name: Optional[str]
+    stackmode: Optional[str]
+    weight: Optional[str]
+
+
+@dataclass
 class Ar7Overview:
     mode: Optional[str]
     active_provider: Optional[str]
     bridge_interfaces: List[Ar7BridgeInterface]
     vccs: List[Ar7VccEntry]
     vlans: List[Ar7VlanEntry]
+    dsl_ifaces: List[Ar7DslIface]
 
 
 @dataclass
@@ -1221,6 +1232,7 @@ def parse_ar7_overview(text: str) -> Ar7Overview:
             bridge_interfaces=[],
             vccs=[],
             vlans=[],
+            dsl_ifaces=[],
         )
 
     bridge_interfaces = []
@@ -1266,12 +1278,26 @@ def parse_ar7_overview(text: str) -> Ar7Overview:
                 )
             )
 
+    dsl_ifaces = []
+    for block in _extract_named_blocks(ar7cfg_body, "dslifaces"):
+        dsl_ifaces.append(
+            Ar7DslIface(
+                name=_find_block_value(block, "name"),
+                enabled=_find_block_value(block, "enabled"),
+                dsl_encap=_dsl_encap_label(_find_block_value(block, "dsl_encap")),
+                dsl_interface_name=_find_block_value(block, "dslinterfacename"),
+                stackmode=_find_block_value(block, "stackmode"),
+                weight=_find_block_value(block, "weight"),
+            )
+        )
+
     return Ar7Overview(
         mode=_find_block_value(ar7cfg_body, "mode"),
         active_provider=_find_block_value(ar7cfg_body, "active_provider"),
         bridge_interfaces=bridge_interfaces,
         vccs=vccs,
         vlans=vlans,
+        dsl_ifaces=dsl_ifaces,
     )
 
 
@@ -2749,6 +2775,25 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
     mode_label = _mode_label(ar7_overview.mode)
     st.markdown(f"**Betriebsart:** {mode_label} (`{ar7_overview.mode}`)")
 
+    def _render_dsl_ifaces() -> None:
+        if not ar7_overview.dsl_ifaces:
+            return
+        st.markdown("**DSL-Interfaces (dslifaces)**")
+        df = pd.DataFrame(
+            [
+                {
+                    "Name": entry.name or "k.A.",
+                    "Aktiv": entry.enabled or "k.A.",
+                    "DSL Encapsulation": entry.dsl_encap or "k.A.",
+                    "DSL Interface": entry.dsl_interface_name or "k.A.",
+                    "Stackmode": entry.stackmode or "k.A.",
+                    "Gewicht": entry.weight or "k.A.",
+                }
+                for entry in ar7_overview.dsl_ifaces
+            ]
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
     if ar7_overview.mode == "dsldmode_full_bridge":
         st.markdown("**Bridge-Interfaces (brinterfaces)**")
         if not ar7_overview.bridge_interfaces:
@@ -2767,6 +2812,7 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                 ]
             )
             st.dataframe(df, use_container_width=True, hide_index=True)
+        _render_dsl_ifaces()
         return
 
     if ar7_overview.mode == "dsldmode_router":
@@ -2804,8 +2850,10 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                 ]
             )
             st.dataframe(df, use_container_width=True, hide_index=True)
+        _render_dsl_ifaces()
         return
 
+    _render_dsl_ifaces()
     st.info("AR7-Modus ist nicht ausgewertet.")
 
 
