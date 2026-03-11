@@ -794,7 +794,7 @@ def is_mesh_client_connected(node: dict, mesh_links: List[dict]) -> bool:
 
 
 
-def parse_float(value: Optional[str]) -> Optional[float]:
+def parse_optional_float(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
     value = value.strip()
@@ -823,7 +823,7 @@ def extract_dect_rssi_index_to_dbm(text: str) -> Dict[int, float]:
 
 
 def parse_dect_rssi_value(value: str, dect_rssi_index_to_dbm: Dict[int, float]) -> Optional[float]:
-    parsed_value = parse_float(value)
+    parsed_value = parse_optional_float(value)
     if parsed_value is None:
         return None
     mapped_value = dect_rssi_index_to_dbm.get(int(parsed_value)) if parsed_value.is_integer() else None
@@ -875,9 +875,9 @@ def parse_dect_device_info(text: str, dect_rssi_index_to_dbm: Dict[int, float]) 
                 model=parse_dect_model(values1[3]),
                 ipui=values1[5] or None,
                 curr_codec=values1[7] or None,
-                ber=parse_float(values1[27]),
+                ber=parse_optional_float(values1[27]),
                 rssi_values=[v for v in rssi_values if v is not None],
-                hg_ber=parse_float(values2[12]) if len(values2) >= 13 else None,
+                hg_ber=parse_optional_float(values2[12]) if len(values2) >= 13 else None,
                 hg_rssi_values=[v for v in hg_rssi_values if v is not None],
                 no_emission=parse_int(values2[23]) if len(values2) >= 24 else None,
                 fw_version=values2[24] if len(values2) >= 25 and values2[24] else None,
@@ -921,7 +921,7 @@ def parse_dect_basis_info(text: str) -> Optional[DectBasisInfo]:
     )
 
 
-def _format_on_off(value: Optional[int], yes: str = "Ja", no: str = "Nein") -> str:
+def _format_binary_state(value: Optional[int], yes: str = "Ja", no: str = "Nein") -> str:
     if value is None:
         return "k.A."
     return yes if value == 1 else no
@@ -951,17 +951,17 @@ def render_dect_basis_info(info: Optional[DectBasisInfo]) -> None:
         return
 
     rows = [
-        {"Eigenschaft": "DECT aktiviert", "Wert": _format_on_off(info.dect_enabled)},
-        {"Eigenschaft": "Als Repeater konfiguriert", "Wert": _format_on_off(info.dect_repeater_enabled)},
-        {"Eigenschaft": "Funkleistung verringern (ECOMode)", "Wert": _format_on_off(info.eco_mode)},
+        {"Eigenschaft": "DECT aktiviert", "Wert": _format_binary_state(info.dect_enabled)},
+        {"Eigenschaft": "Als Repeater konfiguriert", "Wert": _format_binary_state(info.dect_repeater_enabled)},
+        {"Eigenschaft": "Funkleistung verringern (ECOMode)", "Wert": _format_binary_state(info.eco_mode)},
         {"Eigenschaft": "DECT Eco aktiv", "Wert": _format_no_emission_mode(info.no_emission)},
         {"Eigenschaft": "Aktueller DECT-Eco-Status", "Wert": info.no_emission_state if info.no_emission_state is not None else "k.A."},
         {"Eigenschaft": "Verschlüsselung aktiv", "Wert": _format_repeater_mode(info.repeater_mode)},
-        {"Eigenschaft": "GAP-Problembehandlung", "Wert": _format_on_off(info.overlapped_sending)},
-        {"Eigenschaft": "Erweiterte Sicherheitsfunktionen", "Wert": _format_on_off(info.ext_security)},
-        {"Eigenschaft": "CATiq 2.0 aktiviert", "Wert": _format_on_off(info.catiq20support)},
-        {"Eigenschaft": "PIN-Schutz aktiv", "Wert": _format_on_off(info.pin_protect)},
-        {"Eigenschaft": "Smarthomegeräteverschlüsselung", "Wert": _format_on_off(info.avmuleaes)},
+        {"Eigenschaft": "GAP-Problembehandlung", "Wert": _format_binary_state(info.overlapped_sending)},
+        {"Eigenschaft": "Erweiterte Sicherheitsfunktionen", "Wert": _format_binary_state(info.ext_security)},
+        {"Eigenschaft": "CATiq 2.0 aktiviert", "Wert": _format_binary_state(info.catiq20support)},
+        {"Eigenschaft": "PIN-Schutz aktiv", "Wert": _format_binary_state(info.pin_protect)},
+        {"Eigenschaft": "Smarthomegeräteverschlüsselung", "Wert": _format_binary_state(info.avmuleaes)},
         {"Eigenschaft": "RFPI (DECT-Basiskennung)", "Wert": info.rfpi or "k.A."},
     ]
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -1136,7 +1136,7 @@ def _strip_quotes(value: Optional[str]) -> Optional[str]:
     return value.strip().rstrip(';').strip().strip('"').strip("'")
 
 
-def _format_on_off(value: Optional[object]) -> str:
+def _format_toggle_state(value: Optional[object]) -> str:
     if value is None:
         return "k.A."
     normalized = str(value).strip().lower()
@@ -1819,9 +1819,14 @@ def parse_table_rows(section: str, start_marker: str, columns: List[str]) -> Lis
     return rows
 
 
-def parse_float(value: str) -> Optional[float]:
+def parse_channel_float(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    normalized = str(value).strip().replace(",", ".")
+    if not normalized:
+        return None
     try:
-        return float(value)
+        return float(normalized)
     except (TypeError, ValueError):
         return None
 
@@ -1908,8 +1913,8 @@ def parse_docsis_channels(text: str) -> dict:
 
     upstream_channels = []
     for row in upstream_rows:
-        frequency = parse_float(row["Frequency"])
-        power = parse_float(row["Power"])
+        frequency = parse_channel_float(row["Frequency"])
+        power = parse_channel_float(row["Power"])
         if not is_plausible_channel(row["Active"], frequency, power, row["Mod"]):
             continue
         upstream_channels.append(
@@ -1924,9 +1929,9 @@ def parse_docsis_channels(text: str) -> dict:
 
     downstream_channels = []
     for row in downstream_rows:
-        frequency = parse_float(row["Frequency"])
-        power = parse_float(row["Power"])
-        mse = parse_float(row["MSE"])
+        frequency = parse_channel_float(row["Frequency"])
+        power = parse_channel_float(row["Power"])
+        mse = parse_channel_float(row["MSE"])
         if not is_plausible_channel(row["Active"], frequency, power, row["Mod"]):
             continue
         if mse is None or abs(mse) < 0.1:
@@ -1949,10 +1954,10 @@ def parse_docsis_channels(text: str) -> dict:
         freq_match = re.match(r"([\d.]+)\s*-\s*([\d.]+)", row["Frequency"])
         if not freq_match:
             continue
-        freq_start = parse_float(freq_match.group(1))
-        freq_end = parse_float(freq_match.group(2))
-        power = parse_float(row["Power"])
-        mer = parse_float(row["MER"])
+        freq_start = parse_channel_float(freq_match.group(1))
+        freq_end = parse_channel_float(freq_match.group(2))
+        power = parse_channel_float(row["Power"])
+        mer = parse_channel_float(row["MER"])
         if row["Active"].strip().upper() != "YES":
             continue
         if freq_start is None or freq_start <= 0 or freq_end is None or freq_end <= 0:
@@ -2292,8 +2297,8 @@ def assess_cable_limits(docsis_data: dict) -> tuple[str, str]:
         match = re.match(r"([\d.]+)\s*-\s*([\d.]+)", str(freq_range))
         if not match:
             continue
-        start = parse_float(match.group(1))
-        end = parse_float(match.group(2))
+        start = parse_channel_float(match.group(1))
+        end = parse_channel_float(match.group(2))
         if start is None or end is None:
             continue
         if start < 110 or end > 1218:
@@ -2927,15 +2932,15 @@ def render_network_settings(settings: Ar7NetworkSettings) -> None:
                         <li>IPv4: <strong>{html.escape(_ipv4_label(settings.ipv4_mode))}</strong></li>
                         <li>IPv6: <strong>{html.escape(_ipv6_label(settings.ipv6_mode))}</strong></li>
                         <li>MTU: <strong>{html.escape(settings.mtu or 'k.A.')}</strong></li>
-                        <li>WAN VLAN: <strong>{html.escape(_format_on_off(settings.wan_vlan))}</strong></li>
-                        <li>TR-069: <strong>{html.escape(_format_on_off(settings.tr069))}</strong></li>
-                        <li>SNMP auf WAN: <strong>{html.escape(_format_on_off(settings.snmp_wan))}</strong></li>
+                        <li>WAN VLAN: <strong>{html.escape(_format_toggle_state(settings.wan_vlan))}</strong></li>
+                        <li>TR-069: <strong>{html.escape(_format_toggle_state(settings.tr069))}</strong></li>
+                        <li>SNMP auf WAN: <strong>{html.escape(_format_toggle_state(settings.snmp_wan))}</strong></li>
                     </ul>
                     <h3>Services &amp; Einstellungen</h3>
                     <ul>
-                        <li>DynDNS: <strong>{html.escape(_format_on_off(settings.dyn_dns))}</strong></li>
-                        <li>E-Mail Reports: <strong>{html.escape(_format_on_off(settings.email_reports))}</strong></li>
-                        <li>Expertenmodus: <strong>{html.escape(_format_on_off(settings.expert_mode))}</strong></li>
+                        <li>DynDNS: <strong>{html.escape(_format_toggle_state(settings.dyn_dns))}</strong></li>
+                        <li>E-Mail Reports: <strong>{html.escape(_format_toggle_state(settings.email_reports))}</strong></li>
+                        <li>Expertenmodus: <strong>{html.escape(_format_toggle_state(settings.expert_mode))}</strong></li>
                         <li>Versteckte Menüs: <strong>{html.escape(hidden_line)}</strong></li>
                     </ul>
                 </div>
