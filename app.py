@@ -1986,7 +1986,53 @@ def parse_docsis_channels(text: str) -> dict:
         "upstream_channels": upstream_channels,
         "downstream_channels": downstream_channels,
         "ofdm_channels": ofdm_channels,
+        "spectrum_points": parse_cable_spectrum(text),
     }
+
+
+def parse_cable_spectrum(text: str) -> List[dict]:
+    spectrum_section = extract_section_between(
+        text,
+        "##### BEGIN SECTION DOCSIS cable spectrum",
+        "##### END SECTION DOCSIS cable spectrum",
+    )
+    if not spectrum_section:
+        return []
+
+    data_line = next((line.strip() for line in spectrum_section.splitlines() if line.strip() and not line.startswith("#")), "")
+    if not data_line:
+        return []
+
+    values: List[int] = []
+    for raw_value in data_line.split(","):
+        normalized = raw_value.strip()
+        if not normalized:
+            continue
+        try:
+            values.append(int(normalized))
+        except ValueError:
+            return []
+
+    if len(values) < 4:
+        return []
+
+    min_freq_hz, max_freq_hz, step_hz = values[0], values[1], values[2]
+    if step_hz <= 0 or max_freq_hz < min_freq_hz:
+        return []
+
+    amplitudes = values[3:]
+    points = []
+    for index, amplitude_raw in enumerate(amplitudes):
+        frequency_hz = min_freq_hz + index * step_hz
+        if frequency_hz > max_freq_hz:
+            break
+        points.append(
+            {
+                "Frequenz (MHz)": round(frequency_hz / 1_000_000, 3),
+                "Pegel (dB)": amplitude_raw / 10,
+            }
+        )
+    return points
 
 
 def connection_quality_label(rssi: int, quality: int) -> str:
@@ -2405,6 +2451,21 @@ def render_cable_dashboard(docsis_data: dict) -> None:
         st.dataframe(pd.DataFrame(upstream), use_container_width=True)
     else:
         st.info("Keine plausiblen Upstream-Kanäle gefunden.")
+
+    st.subheader("Cable Spektrum")
+    spectrum_points = docsis_data.get("spectrum_points", [])
+    if spectrum_points:
+        spectrum_df = pd.DataFrame(spectrum_points)
+        fig = px.line(
+            spectrum_df,
+            x="Frequenz (MHz)",
+            y="Pegel (dB)",
+            labels={"Frequenz (MHz)": "Frequenz (MHz)", "Pegel (dB)": "Pegel (dB)"},
+            title="DOCSIS Cable Spektrum",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Keine Cable-Spektrumsdaten gefunden.")
 
     assessment, status = assess_cable_quality(docsis_data)
     if status == "success":

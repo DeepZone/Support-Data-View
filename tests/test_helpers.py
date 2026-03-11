@@ -23,6 +23,27 @@ class HelperFunctionTests(unittest.TestCase):
         self.assertEqual(app.parse_channel_float("4.5"), 4.5)
         self.assertIsNone(app.parse_channel_float(""))
 
+    def test_parse_cable_spectrum_reads_points(self):
+        text = """##### BEGIN SECTION DOCSIS cable spectrum
+# min, max, step size, data...
+1000000, 2000000, 500000, 10, 20, 30
+##### END SECTION DOCSIS cable spectrum"""
+        points = app.parse_cable_spectrum(text)
+        self.assertEqual(
+            points,
+            [
+                {"Frequenz (MHz)": 1.0, "Pegel (dB)": 1.0},
+                {"Frequenz (MHz)": 1.5, "Pegel (dB)": 2.0},
+                {"Frequenz (MHz)": 2.0, "Pegel (dB)": 3.0},
+            ],
+        )
+
+    def test_parse_cable_spectrum_returns_empty_for_invalid_data(self):
+        text = """##### BEGIN SECTION DOCSIS cable spectrum
+1000000, 2000000, 0, 10
+##### END SECTION DOCSIS cable spectrum"""
+        self.assertEqual(app.parse_cable_spectrum(text), [])
+
 
 if __name__ == "__main__":
     unittest.main()
