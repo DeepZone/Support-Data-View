@@ -156,6 +156,14 @@ class HardwareRatelimiterSession:
 
 
 @dataclass
+class ConnectionPerformanceFinding:
+    category: str
+    severity: str
+    title: str
+    details: str
+
+
+@dataclass
 class MeshTopology:
     nodes: List[dict]
     links: List[dict]
@@ -3539,15 +3547,209 @@ def analyze_hardware_ratelimiter_sessions(sessions: List[HardwareRatelimiterSess
     }
 
 
+def parse_drop_indicators(text: str) -> Dict[str, int]:
+    patterns = {
+        "icmp_rate_limit": r"icmp\s*rate\s*limit",
+        "echo_request_rate_limit": r"echo\s*request",
+        "frag_freemem": r"frag\s*:\s*freemem",
+        "tcp_checksum_wrong": r"tcp\s*checksum\s*wrong",
+        "reject_not_possible": r"reject\s*not\s*possible",
+    }
+    counters = {key: 0 for key in patterns}
+    for line in text.splitlines():
+        lowered = line.lower()
+        for key, pattern in patterns.items():
+            if not re.search(pattern, lowered):
+                continue
+            numbers = re.findall(r"\d+", line)
+            counters[key] += int(numbers[-1]) if numbers else 1
+    return {key: value for key, value in counters.items() if value > 0}
+
+
+def parse_offload_indicators(text: str) -> Dict[str, int]:
+    patterns = {
+        "cpu_fallback": r"fallback\s+to\s+cpu|cpu\s+fallback",
+        "session_evictions": r"evictions?",
+        "session_flushes": r"flush(es)?",
+        "overflow": r"overflow",
+        "not_synchronizable": r"not\s+synchroniz",
+    }
+    indicators = {key: 0 for key in patterns}
+    lowered = text.lower()
+    for key, pattern in patterns.items():
+        indicators[key] = len(re.findall(pattern, lowered))
+    return {key: value for key, value in indicators.items() if value > 0}
+
+
+def analyze_connection_performance(
+    runtime_entries: List[RatelimiterRuntimeEntry],
+    config_entries: List[RatelimiterConfigEntry],
+    hardware_analysis: dict,
+    load_average: Optional[List[str]],
+    text: str,
+) -> dict:
+    summary = hardware_analysis.get("summary", {})
+    assessment = list(hardware_analysis.get("assessment", []))
+    findings: List[ConnectionPerformanceFinding] = []
+    score = 0
+
+    total_blocked = sum(entry.blocked for entry in runtime_entries)
+    total_hits = sum(entry.hits for entry in runtime_entries)
+    total_packets = int(summary.get("total_packets", 0) or 0)
+    total_bytes = int(summary.get("total_bytes", 0) or 0)
+    sessions = int(summary.get("total_sessions", 0) or 0)
+    unique_sources = summary.get("unique_sources", [])
+    unique_source_count = len(unique_sources)
+    limited_ports = summary.get("limited_ports", [])
+    catchall_count = sum(1 for session in hardware_analysis.get("sessions", []) if session.get("catchall"))
+    management_ports = sorted({port for port in limited_ports if port in {443, 499}})
+
+    load_values: List[float] = []
+    if load_average:
+        for value in load_average:
+            try:
+                load_values.append(float(value))
+            except (TypeError, ValueError):
+                load_values.append(0.0)
+    load_1, load_5, load_15 = (load_values + [0.0, 0.0, 0.0])[:3]
+
+    drop_indicators = parse_drop_indicators(text)
+    offload_indicators = parse_offload_indicators(text)
+
+    findings.append(
+        ConnectionPerformanceFinding(
+            category="ratelimiter",
+            severity="info",
+            title="Rate-Limiter-Bewertung",
+            details=(
+                f"{sessions} Hardware-Sessions, {total_packets} Pakete, {total_blocked} geblockte Pakete. "
+                f"{unique_source_count} eindeutige Source-IPs, {len(limited_ports)} limitierte Zielports."
+            ),
+        )
+    )
+
+    if total_blocked >= 1000:
+        score += 30
+        findings.append(ConnectionPerformanceFinding("drops", "critical", "Viele geblockte Pakete", "Die Block-Counts sind hoch und können auf relevanten Schutz-/Lastdruck hinweisen."))
+    elif total_blocked >= 100:
+        score += 15
+        findings.append(ConnectionPerformanceFinding("drops", "warning", "Erhöhte Block-Aktivität", "Geblockte Pakete treten gehäuft auf und sollten beobachtet werden."))
+    elif total_blocked > 0:
+        score += 5
+
+    if unique_source_count >= 8 and len(limited_ports) >= 5:
+        score += 20
+        findings.append(ConnectionPerformanceFinding("traffic", "warning", "Breites Quell-/Port-Muster", "Viele externe Quellen und mehrere Zielports deuten eher auf Scan-/Hintergrundtraffic."))
+    elif unique_source_count >= 4 and len(limited_ports) >= 3:
+        score += 10
+        findings.append(ConnectionPerformanceFinding("traffic", "warning", "Auffälliges Trafficmuster", "Mehrere Quellen und Zielports deuten auf erhöhte Schutzaktivität."))
+
+    if total_packets >= 200_000:
+        score += 20
+    elif total_packets >= 50_000:
+        score += 10
+
+    if load_1 >= 3.5 or load_5 >= 2.5:
+        score += 30
+        findings.append(ConnectionPerformanceFinding("cpu", "critical", "Hohe Systemlast", "Die Load-Average ist deutlich erhöht und kann die Verarbeitung beeinträchtigen."))
+    elif load_1 >= 1.5 or load_5 >= 1.0:
+        score += 15
+        findings.append(ConnectionPerformanceFinding("cpu", "warning", "Erhöhte Systemlast", "Die Lastwerte sind erhöht und sollten im Kontext beobachtet werden."))
+    else:
+        findings.append(ConnectionPerformanceFinding("cpu", "info", "Systemlast unauffällig", "Die vorliegenden Load-Werte sprechen nicht für eine Überlastung der FRITZ!Box."))
+
+    drop_score = sum(drop_indicators.values())
+    severe_drop_hits = drop_indicators.get("frag_freemem", 0) + drop_indicators.get("reject_not_possible", 0)
+    if severe_drop_hits > 0:
+        score += 20
+        findings.append(ConnectionPerformanceFinding("drops", "critical", "Kritische Drop-Indikatoren", "Speicher-/Reject-Hinweise deuten auf relevanten Verarbeitungsdruck hin."))
+    elif drop_score >= 100:
+        score += 20
+        findings.append(ConnectionPerformanceFinding("drops", "warning", "Viele Drop-/Rate-Limit-Ereignisse", "Mehrere Dropcounter sind deutlich erhöht."))
+    elif drop_score >= 20:
+        score += 10
+        findings.append(ConnectionPerformanceFinding("drops", "warning", "Moderate Drop-Indikatoren", "Drop-/Rate-Limit-Counter sind vorhanden, aber nicht extrem."))
+    elif drop_score > 0:
+        score += 5
+
+    offload_score = sum(offload_indicators.values())
+    if offload_score >= 5:
+        score += 15
+        findings.append(ConnectionPerformanceFinding("offload", "warning", "Offload-/Session-Hinweise", "Es gibt Indikatoren für Fallbacks, Flushes oder Session-Druck."))
+    elif offload_score > 0:
+        score += 5
+
+    if (load_1 >= 1.5 or load_5 >= 1.0) and (drop_score >= 20 or total_blocked >= 100):
+        score += 15
+        findings.append(ConnectionPerformanceFinding("traffic", "warning", "Kombinierter Last-/Drop-Effekt", "Erhöhte Last und Schutz-/Drop-Aktivität treten gleichzeitig auf."))
+
+    if management_ports and sessions > 0 and score <= 20:
+        findings.append(ConnectionPerformanceFinding("ratelimiter", "info", "Management-Port-Schutz aktiv", "Port 443/499 ist limitiert – das ist häufig normaler Schutzmechanismus."))
+
+    if not runtime_entries and not config_entries and sessions == 0:
+        findings.append(ConnectionPerformanceFinding("ratelimiter", "info", "Keine Rate-Limiter-Daten", "Es liegen keine verwertbaren Rate-Limiter-Informationen vor."))
+
+    score = max(0, min(score, 100))
+    if score >= 70:
+        status = "red"
+        summary_text = "Auffällige Schutz-/Drop- oder Lastindikatoren deuten auf eine mögliche Beeinträchtigung der Anschluss-Performance hin."
+    elif score >= 35:
+        status = "yellow"
+        summary_text = "Es gibt einzelne Auffälligkeiten. Ein klarer Performance-Impact ist nicht belegt, sollte aber beobachtet werden."
+    else:
+        status = "green"
+        summary_text = "Keine belastbaren Hinweise auf ein Performanceproblem am Anschluss."
+
+    if management_ports and score < 35:
+        summary_text += " Der aktive Rate-Limiter wirkt hier überwiegend wie ein normaler Schutzmechanismus."
+
+    assessment.extend(
+        [
+            "Die Einschätzung kombiniert Rate-Limiter, Last, Drop- und Offload-Indikatoren.",
+            "Die Bewertung ist heuristisch und kein harter Fehlernachweis.",
+        ]
+    )
+
+    return {
+        "status": status,
+        "score": score,
+        "summary": summary_text,
+        "findings": [finding.__dict__ for finding in findings],
+        "metrics": {
+            "ratelimiter_sessions": sessions,
+            "ratelimiter_packets": total_packets,
+            "ratelimiter_bytes": total_bytes,
+            "ratelimiter_unique_sources": unique_source_count,
+            "limited_ports": limited_ports,
+            "blocked_packets": total_blocked,
+            "load_1": load_1,
+            "load_5": load_5,
+            "load_15": load_15,
+            "cpu_idle": None,
+            "drop_indicators": drop_indicators,
+            "offload_indicators": offload_indicators,
+            "runtime_hits": total_hits,
+            "catchall_rules": catchall_count,
+        },
+        "assessment": assessment,
+    }
+
+
 def render_ratelimiter(
     runtime_entries: List[RatelimiterRuntimeEntry],
     config_entries: List[RatelimiterConfigEntry],
     hardware_analysis: dict,
+    connection_performance_analysis: dict,
 ) -> None:
-    st.subheader("Ratelimiter-Übersicht")
+    st.subheader("Anschluss-Performance")
     sessions = hardware_analysis.get("sessions", [])
     summary = hardware_analysis.get("summary", {})
     assessment = hardware_analysis.get("assessment", [])
+    performance_findings = connection_performance_analysis.get("findings", [])
+    performance_metrics = connection_performance_analysis.get("metrics", {})
+    performance_status = connection_performance_analysis.get("status", "green")
+    performance_score = connection_performance_analysis.get("score", 0)
+    performance_summary = connection_performance_analysis.get("summary", "")
 
     if not runtime_entries and not config_entries and not sessions:
         st.info("Keine Ratelimiter-Daten in der Support-Datei gefunden.")
@@ -3558,6 +3760,34 @@ def render_ratelimiter(
     active_rules = sum(1 for entry in runtime_entries if entry.hits > 0)
     configured_rules = len(config_entries)
 
+    status_label = {"green": "🟢 Unauffällig", "yellow": "🟡 Beobachten", "red": "🔴 Auffällig"}.get(performance_status, "🟢 Unauffällig")
+    c_status, c_score = st.columns([2, 1])
+    c_status.metric("Status", status_label)
+    c_score.metric("Performance-Score", f"{performance_score}/100")
+    if performance_summary:
+        st.markdown(f"**Kurzfazit:** {performance_summary}")
+
+    analysis_blocks = {
+        "ratelimiter": "Rate-Limiter-Bewertung",
+        "cpu": "Systemlast / CPU / Load",
+        "drops": "Drops / Paketverluste / Rate-Limits",
+        "offload": "Offload- / Session-Indikatoren",
+        "traffic": "Anschluss- / Traffic-Indikatoren",
+    }
+    for category, title in analysis_blocks.items():
+        block_findings = [item for item in performance_findings if item.get("category") == category]
+        if not block_findings:
+            continue
+        st.markdown(f"**{title}**")
+        for item in block_findings:
+            prefix = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(item.get("severity"), "🔵")
+            st.markdown(f"- {prefix} **{item.get('title')}**: {item.get('details')}")
+
+    st.markdown("**Technische Einschätzung**")
+    for item in connection_performance_analysis.get("assessment", []):
+        st.markdown(f"- {item}")
+
+    st.subheader("Technische Details (Ratelimiter-Rohdaten)")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Laufzeit-Regeln", len(runtime_entries))
     col2.metric("Konfigurierte Regeln", configured_rules)
@@ -3636,8 +3866,15 @@ def render_ratelimiter(
             + (", ".join(str(port) for port in ports) if ports else "Keine")
         )
 
+    if performance_metrics.get("drop_indicators") or performance_metrics.get("offload_indicators"):
+        st.markdown("**Zusätzliche Indikatoren**")
+        if performance_metrics.get("drop_indicators"):
+            st.json({"drop_indicators": performance_metrics.get("drop_indicators")})
+        if performance_metrics.get("offload_indicators"):
+            st.json({"offload_indicators": performance_metrics.get("offload_indicators")})
+
     if assessment:
-        st.subheader("Technische Einschätzung")
+        st.markdown("**Ratelimiter-spezifische Einschätzung**")
         for item in assessment:
             st.markdown(f"- {item}")
 
@@ -3646,6 +3883,10 @@ def render_ratelimiter(
 def parse_support_data(text: str) -> dict:
     access_technology = detect_access_technology(text)
     dect_rssi_index_to_dbm = extract_dect_rssi_index_to_dbm(text)
+    ratelimiter_runtime = parse_ratelimiter_runtime(text)
+    ratelimiter_config = parse_ratelimiter_config(text)
+    ratelimiter_sessions = parse_hardware_ratelimiter_sessions(text)
+    ratelimiter_analysis = analyze_hardware_ratelimiter_sessions(ratelimiter_sessions)
     return {
         "access_technology": access_technology,
         "device_mac": extract_device_mac(text),
@@ -3665,9 +3906,16 @@ def parse_support_data(text: str) -> dict:
         "voip_accounts": parse_voip_accounts(text),
         "neighbour_clients": parse_neighbour_clients(text),
         "events": parse_events(text),
-        "ratelimiter_runtime": parse_ratelimiter_runtime(text),
-        "ratelimiter_config": parse_ratelimiter_config(text),
-        "ratelimiter_analysis": analyze_hardware_ratelimiter_sessions(parse_hardware_ratelimiter_sessions(text)),
+        "ratelimiter_runtime": ratelimiter_runtime,
+        "ratelimiter_config": ratelimiter_config,
+        "ratelimiter_analysis": ratelimiter_analysis,
+        "connection_performance_analysis": analyze_connection_performance(
+            ratelimiter_runtime,
+            ratelimiter_config,
+            ratelimiter_analysis,
+            parse_fritz_load_average(text),
+            text,
+        ),
         "mesh_topology": parse_mesh_topology(text),
         "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
@@ -3757,6 +4005,7 @@ def build_dashboard(text: str) -> None:
     ratelimiter_runtime = parsed["ratelimiter_runtime"]
     ratelimiter_config = parsed["ratelimiter_config"]
     ratelimiter_analysis = parsed["ratelimiter_analysis"]
+    connection_performance_analysis = parsed["connection_performance_analysis"]
     mesh_topology = parsed["mesh_topology"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
@@ -3787,7 +4036,7 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Ratelimiter", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Anschluss-Performance", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
     tabs = st.tabs(tab_names)
     tab_dsl, tab_internet, tab_lan, tab_wlan, tab_ratelimiter, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:10]
     with tab_dsl:
@@ -3814,7 +4063,7 @@ def build_dashboard(text: str) -> None:
         render_wlan_radio_load(radio_loads)
 
     with tab_ratelimiter:
-        render_ratelimiter(ratelimiter_runtime, ratelimiter_config, ratelimiter_analysis)
+        render_ratelimiter(ratelimiter_runtime, ratelimiter_config, ratelimiter_analysis, connection_performance_analysis)
 
     with tab_mesh:
         render_mesh_topology(mesh_topology)
