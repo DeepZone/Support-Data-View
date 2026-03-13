@@ -153,6 +153,120 @@ rule type: ACL IPO
         self.assertIn("Management-Port wird durch Rate-Limiter geschützt.", analysis["assessment"])
         self.assertIn("Sehr hohe Paketanzahl erkannt, möglicher Flood.", analysis["assessment"])
 
+    def _build_hardware_analysis(self, session_text: str):
+        sessions = app.parse_hardware_ratelimiter_sessions(session_text)
+        return app.analyze_hardware_ratelimiter_sessions(sessions)
+
+    def test_connection_performance_unauffaellig(self):
+        runtime = [
+            app.RatelimiterRuntimeEntry("WAN", "rule", packets=1000, interval_seconds=1, hits=10, blocked=0)
+        ]
+        config = [app.RatelimiterConfigEntry("rule", "qos_wan", "ip.proto 6", 1000, "1s", 0, True)]
+        hardware_analysis = self._build_hardware_analysis(
+            """accelerator: ratelimiter
+source IPv4: 192.168.1.10
+destination IPv4: 80.72.48.243
+destination port: 80
+matched packets: 120
+matched bytes: 2048
+"""
+        )
+        result = app.analyze_connection_performance(runtime, config, hardware_analysis, ["0.12", "0.10", "0.09"], "")
+        self.assertEqual(result["status"], "green")
+        self.assertLess(result["score"], 35)
+
+    def test_connection_performance_beobachten(self):
+        runtime = [
+            app.RatelimiterRuntimeEntry("WAN", "rule", packets=1000, interval_seconds=1, hits=250, blocked=50)
+        ]
+        config = [app.RatelimiterConfigEntry("rule", "qos_wan", "ip.proto 6", 1000, "1s", 0, True)]
+        hardware_analysis = self._build_hardware_analysis(
+            """accelerator: ratelimiter
+source IPv4: 1.2.3.4
+destination IPv4: 80.72.48.243
+destination port: 80
+matched packets: 1000
+matched bytes: 2048
+
+accelerator: ratelimiter
+source IPv4: 5.6.7.8
+destination IPv4: 80.72.48.243
+destination port: 443
+matched packets: 800
+matched bytes: 1024
+
+accelerator: ratelimiter
+source IPv4: 9.8.7.6
+destination IPv4: 80.72.48.243
+destination port: 53
+matched packets: 600
+matched bytes: 1000
+
+accelerator: ratelimiter
+source IPv4: 7.7.7.7
+destination IPv4: 80.72.48.243
+destination port: 22
+matched packets: 500
+matched bytes: 1000
+"""
+        )
+        text = "icmp rate limit: 15\nrate limit echo request: 10"
+        result = app.analyze_connection_performance(runtime, config, hardware_analysis, ["1.8", "1.1", "0.8"], text)
+        self.assertEqual(result["status"], "yellow")
+        self.assertGreaterEqual(result["score"], 35)
+        self.assertLess(result["score"], 70)
+
+    def test_connection_performance_auffaellig(self):
+        runtime = [
+            app.RatelimiterRuntimeEntry("WAN", "rule", packets=1000, interval_seconds=1, hits=5000, blocked=1500)
+        ]
+        config = [app.RatelimiterConfigEntry("rule", "qos_wan", "ip.proto 6", 1000, "1s", 0, True)]
+        hardware_analysis = self._build_hardware_analysis(
+            """accelerator: ratelimiter
+source IPv4: 1.2.3.4
+destination IPv4: 80.72.48.243
+destination port: 80
+matched packets: 180000
+matched bytes: 999999
+
+accelerator: ratelimiter
+source IPv4: 5.6.7.8
+destination IPv4: 80.72.48.243
+destination port: 23
+matched packets: 60000
+matched bytes: 999999
+"""
+        )
+        text = "frag: freemem 12\nreject not possible: 5\ntcp checksum wrong: 120"
+        result = app.analyze_connection_performance(runtime, config, hardware_analysis, ["4.2", "3.1", "2.8"], text)
+        self.assertEqual(result["status"], "red")
+        self.assertGreaterEqual(result["score"], 70)
+
+    def test_connection_performance_management_schutz_nicht_automatisch_kritisch(self):
+        runtime = [
+            app.RatelimiterRuntimeEntry("WAN", "rule", packets=1000, interval_seconds=1, hits=40, blocked=0)
+        ]
+        config = [app.RatelimiterConfigEntry("rule", "qos_wan", "ip.proto 6", 1000, "1s", 0, True)]
+        hardware_analysis = self._build_hardware_analysis(
+            """accelerator: ratelimiter
+source IPv4: 80.66.224.98
+destination IPv4: 80.72.48.243
+destination port: 499
+matched packets: 300
+matched bytes: 5000
+
+accelerator: ratelimiter
+source IPv4: 80.66.224.99
+destination IPv4: 80.72.48.243
+destination port: 443
+matched packets: 200
+matched bytes: 5000
+"""
+        )
+        result = app.analyze_connection_performance(runtime, config, hardware_analysis, ["0.2", "0.2", "0.1"], "")
+        self.assertEqual(result["status"], "green")
+        self.assertIn("normaler Schutzmechanismus", result["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()
