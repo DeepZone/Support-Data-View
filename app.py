@@ -1,4 +1,5 @@
 import base64
+import ipaddress
 import json
 import html
 import re
@@ -140,6 +141,18 @@ class RatelimiterConfigEntry:
     interval: str
     early: int
     enabled: bool
+
+
+@dataclass
+class HardwareRatelimiterSession:
+    source_ip: str
+    destination_ip: str
+    source_port: Optional[int]
+    destination_port: Optional[int]
+    matched_packets: int
+    matched_bytes: int
+    rule_type: Optional[str]
+    catchall: bool
 
 
 @dataclass
@@ -3396,9 +3409,147 @@ def parse_ratelimiter_config(text: str) -> List[RatelimiterConfigEntry]:
     return rows
 
 
-def render_ratelimiter(runtime_entries: List[RatelimiterRuntimeEntry], config_entries: List[RatelimiterConfigEntry]) -> None:
+
+def parse_hardware_ratelimiter_sessions(text: str) -> List[HardwareRatelimiterSession]:
+    sessions: List[HardwareRatelimiterSession] = []
+    current: Dict[str, str] = {}
+
+    def flush() -> None:
+        if not current:
+            return
+        if current.get("accelerator", "").strip().lower() != "ratelimiter":
+            current.clear()
+            return
+
+        source_ip = current.get("source ipv4")
+        destination_ip = current.get("destination ipv4")
+        if not source_ip or not destination_ip:
+            current.clear()
+            return
+
+        def parse_int(field: str) -> int:
+            value = current.get(field)
+            if not value:
+                return 0
+            match = re.search(r"\d+", value)
+            return int(match.group(0)) if match else 0
+
+        def parse_port(field: str) -> Optional[int]:
+            value = current.get(field)
+            if not value:
+                return None
+            match = re.search(r"\d+", value)
+            return int(match.group(0)) if match else None
+
+        catchall = current.get("covered by catchall", "").strip().lower() == "yes"
+        sessions.append(
+            HardwareRatelimiterSession(
+                source_ip=source_ip.strip(),
+                destination_ip=destination_ip.strip(),
+                source_port=parse_port("source port"),
+                destination_port=parse_port("destination port"),
+                matched_packets=parse_int("matched packets"),
+                matched_bytes=parse_int("matched bytes"),
+                rule_type=current.get("rule type", "").strip() or None,
+                catchall=catchall,
+            )
+        )
+        current.clear()
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush()
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        if key == "accelerator" and current:
+            flush()
+        current[key] = value.strip()
+
+    flush()
+    return sessions
+
+
+def analyze_hardware_ratelimiter_sessions(sessions: List[HardwareRatelimiterSession]) -> dict:
+    unique_sources = sorted({session.source_ip for session in sessions})
+    limited_ports = sorted(
+        {
+            session.destination_port
+            for session in sessions
+            if session.destination_port is not None
+        }
+    )
+    total_packets = sum(session.matched_packets for session in sessions)
+    total_bytes = sum(session.matched_bytes for session in sessions)
+
+    assessment: List[str] = []
+    if sessions:
+        assessment.append("Hardware Rate Limiting aktiv, normaler Schutzmechanismus.")
+
+    if any(session.catchall for session in sessions):
+        assessment.append("Catch-all Rate-Limiter-Regel aktiv.")
+
+    if any(port in {443, 499} for port in limited_ports):
+        assessment.append("Management-Port wird durch Rate-Limiter geschützt.")
+
+    if len(unique_sources) >= 8:
+        assessment.append("Auffälliger Traffic von externer IP erkannt (viele Source-Adressen).")
+
+    if total_packets >= 100_000:
+        assessment.append("Sehr hohe Paketanzahl erkannt, möglicher Flood.")
+    elif sessions:
+        assessment.append("Kein Hinweis auf Flood oder Überlastung.")
+
+    external_sources = 0
+    for source in unique_sources:
+        try:
+            addr = ipaddress.ip_address(source)
+            if not (addr.is_private or addr.is_loopback or addr.is_link_local):
+                external_sources += 1
+        except ValueError:
+            continue
+    if external_sources >= 3:
+        assessment.append("Mehrere externe Source-IPs beteiligt, mögliches Scan-Muster.")
+
+    return {
+        "sessions": [
+            {
+                "source_ip": session.source_ip,
+                "destination_ip": session.destination_ip,
+                "source_port": session.source_port,
+                "destination_port": session.destination_port,
+                "matched_packets": session.matched_packets,
+                "matched_bytes": session.matched_bytes,
+                "rule_type": session.rule_type,
+                "catchall": session.catchall,
+            }
+            for session in sessions
+        ],
+        "summary": {
+            "total_sessions": len(sessions),
+            "total_packets": total_packets,
+            "total_bytes": total_bytes,
+            "unique_sources": unique_sources,
+            "limited_ports": limited_ports,
+        },
+        "assessment": assessment,
+    }
+
+
+def render_ratelimiter(
+    runtime_entries: List[RatelimiterRuntimeEntry],
+    config_entries: List[RatelimiterConfigEntry],
+    hardware_analysis: dict,
+) -> None:
     st.subheader("Ratelimiter-Übersicht")
-    if not runtime_entries and not config_entries:
+    sessions = hardware_analysis.get("sessions", [])
+    summary = hardware_analysis.get("summary", {})
+    assessment = hardware_analysis.get("assessment", [])
+
+    if not runtime_entries and not config_entries and not sessions:
         st.info("Keine Ratelimiter-Daten in der Support-Datei gefunden.")
         return
 
@@ -3451,6 +3602,45 @@ def render_ratelimiter(runtime_entries: List[RatelimiterRuntimeEntry], config_en
         )
         st.dataframe(config_df, use_container_width=True, hide_index=True)
 
+    if sessions:
+        st.subheader("Hardware Rate-Limiter Sessions")
+        session_df = pd.DataFrame(
+            [
+                {
+                    "Source IP": session["source_ip"],
+                    "Destination IP": session["destination_ip"],
+                    "Source Port": session["source_port"],
+                    "Destination Port": session["destination_port"],
+                    "Matched Packets": session["matched_packets"],
+                    "Matched Bytes": session["matched_bytes"],
+                    "Rule Type": session["rule_type"] or "k.A.",
+                    "Catchall": "Ja" if session["catchall"] else "Nein",
+                }
+                for session in sessions
+            ]
+        )
+        st.dataframe(session_df, use_container_width=True, hide_index=True)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Hardware Sessions", summary.get("total_sessions", 0))
+        c2.metric("Pakete gesamt", summary.get("total_packets", 0))
+        c3.metric("Bytes gesamt", summary.get("total_bytes", 0))
+
+        st.markdown(
+            "**Unique Source IPs:** "
+            + (", ".join(summary.get("unique_sources", [])) or "Keine")
+        )
+        ports = summary.get("limited_ports", [])
+        st.markdown(
+            "**Limitierte Zielports:** "
+            + (", ".join(str(port) for port in ports) if ports else "Keine")
+        )
+
+    if assessment:
+        st.subheader("Technische Einschätzung")
+        for item in assessment:
+            st.markdown(f"- {item}")
+
 
 @st.cache_data(show_spinner=False)
 def parse_support_data(text: str) -> dict:
@@ -3477,6 +3667,7 @@ def parse_support_data(text: str) -> dict:
         "events": parse_events(text),
         "ratelimiter_runtime": parse_ratelimiter_runtime(text),
         "ratelimiter_config": parse_ratelimiter_config(text),
+        "ratelimiter_analysis": analyze_hardware_ratelimiter_sessions(parse_hardware_ratelimiter_sessions(text)),
         "mesh_topology": parse_mesh_topology(text),
         "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
@@ -3565,6 +3756,7 @@ def build_dashboard(text: str) -> None:
     events = parsed["events"]
     ratelimiter_runtime = parsed["ratelimiter_runtime"]
     ratelimiter_config = parsed["ratelimiter_config"]
+    ratelimiter_analysis = parsed["ratelimiter_analysis"]
     mesh_topology = parsed["mesh_topology"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
@@ -3622,7 +3814,7 @@ def build_dashboard(text: str) -> None:
         render_wlan_radio_load(radio_loads)
 
     with tab_ratelimiter:
-        render_ratelimiter(ratelimiter_runtime, ratelimiter_config)
+        render_ratelimiter(ratelimiter_runtime, ratelimiter_config, ratelimiter_analysis)
 
     with tab_mesh:
         render_mesh_topology(mesh_topology)
