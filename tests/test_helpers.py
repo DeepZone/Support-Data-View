@@ -44,6 +44,49 @@ class HelperFunctionTests(unittest.TestCase):
 ##### END SECTION DOCSIS cable spectrum"""
         self.assertEqual(app.parse_cable_spectrum(text), [])
 
+    def test_parse_ratelimiter_runtime_reads_scope_and_counters(self):
+        text = """ratelimitlanset:
+   rllan-cfg:
+     0: ip.version 6 icmp.type 135 (ratelimit) => 0 (# 56, blocked # 2) pakets 10 interval 1 seconds {now 100 endtime 90 count 1}
+ratelimitwanset:
+   rlwan-cfg:
+     0: ip.proto 6 tcp.flags 0x002/0xfff (ratelimit) => 0 (# 129, blocked # 0) pakets 1000 interval 1 seconds {now 100 endtime 99 count 1}
+"""
+        entries = app.parse_ratelimiter_runtime(text)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0].scope, "LAN")
+        self.assertEqual(entries[0].blocked, 2)
+        self.assertEqual(entries[1].scope, "WAN")
+        self.assertEqual(entries[1].packets, 1000)
+
+    def test_parse_ratelimiter_config_reads_rules(self):
+        text = """ratelimits {
+                enabled = yes;
+                name = "dhcpv6";
+                type = qos_cfg_system;
+                iface = qos_lan;
+                rule = "ip.version 6 udp.dport 547";
+                packets = 10;
+                interval = 1s;
+                early = 0;
+        } {
+                enabled = no;
+                name = "syn";
+                type = qos_cfg_system;
+                iface = qos_wan;
+                rule = "ip.proto 6 tcp.flags 0x002/0xfff";
+                packets = 1000;
+                interval = 1s;
+                early = 1;
+        }
+"""
+        entries = app.parse_ratelimiter_config(text)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0].name, "dhcpv6")
+        self.assertTrue(entries[0].enabled)
+        self.assertFalse(entries[1].enabled)
+        self.assertEqual(entries[1].iface, "qos_wan")
+
 
 if __name__ == "__main__":
     unittest.main()

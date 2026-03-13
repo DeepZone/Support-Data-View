@@ -122,6 +122,27 @@ class EventEntry:
 
 
 @dataclass
+class RatelimiterRuntimeEntry:
+    scope: str
+    rule: str
+    packets: int
+    interval_seconds: int
+    hits: int
+    blocked: int
+
+
+@dataclass
+class RatelimiterConfigEntry:
+    name: str
+    iface: str
+    rule: str
+    packets: int
+    interval: str
+    early: int
+    enabled: bool
+
+
+@dataclass
 class MeshTopology:
     nodes: List[dict]
     links: List[dict]
@@ -3311,7 +3332,124 @@ def render_dect_devices(devices: List[DectDevice]) -> None:
 
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.caption("Einschätzung basiert auf durchschnittlichem RSSI: Werte > -80 dBm sind eher ungünstig.")
+
+
+def parse_ratelimiter_runtime(text: str) -> List[RatelimiterRuntimeEntry]:
+    scopes = {
+        "ratelimitlanset:": "LAN",
+        "ratelimitwanset:": "WAN",
+        "ratelimitearlylanset:": "LAN (Early)",
+    }
+    line_pattern = re.compile(
+        r"^\s*\d+:\s*(?P<rule>.+?)\s*\(ratelimit\)\s*=>\s*\d+\s*\(#\s*(?P<hits>\d+),\s*blocked\s*#\s*(?P<blocked>\d+)\)\s*pakets\s*(?P<packets>\d+)\s*interval\s*(?P<interval>\d+)\s*seconds",
+        re.IGNORECASE,
+    )
+
+    current_scope = "Unbekannt"
+    rows: List[RatelimiterRuntimeEntry] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped in scopes:
+            current_scope = scopes[stripped]
+            continue
+        match = line_pattern.match(line)
+        if not match:
+            continue
+        rows.append(
+            RatelimiterRuntimeEntry(
+                scope=current_scope,
+                rule=match.group("rule"),
+                packets=int(match.group("packets")),
+                interval_seconds=int(match.group("interval")),
+                hits=int(match.group("hits")),
+                blocked=int(match.group("blocked")),
+            )
+        )
+    return rows
+
+
+def parse_ratelimiter_config(text: str) -> List[RatelimiterConfigEntry]:
+    entry_pattern = re.compile(
+        r"enabled\s*=\s*(?P<enabled>yes|no);"
+        r"\s*name\s*=\s*\"(?P<name>[^\"]+)\";"
+        r".*?iface\s*=\s*(?P<iface>[\w_]+);"
+        r"\s*rule\s*=\s*\"(?P<rule>[^\"]+)\";"
+        r"\s*packets\s*=\s*(?P<packets>\d+);"
+        r"\s*interval\s*=\s*(?P<interval>[^;]+);"
+        r"\s*early\s*=\s*(?P<early>\d+);",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    rows: List[RatelimiterConfigEntry] = []
+    for match in entry_pattern.finditer(text):
+        rows.append(
+            RatelimiterConfigEntry(
+                enabled=match.group("enabled").lower() == "yes",
+                name=match.group("name"),
+                iface=match.group("iface"),
+                rule=match.group("rule"),
+                packets=int(match.group("packets")),
+                interval=match.group("interval").strip(),
+                early=int(match.group("early")),
+            )
+        )
+    return rows
+
+
+def render_ratelimiter(runtime_entries: List[RatelimiterRuntimeEntry], config_entries: List[RatelimiterConfigEntry]) -> None:
+    st.subheader("Ratelimiter-Übersicht")
+    if not runtime_entries and not config_entries:
+        st.info("Keine Ratelimiter-Daten in der Support-Datei gefunden.")
+        return
+
+    total_hits = sum(entry.hits for entry in runtime_entries)
+    total_blocked = sum(entry.blocked for entry in runtime_entries)
+    active_rules = sum(1 for entry in runtime_entries if entry.hits > 0)
+    configured_rules = len(config_entries)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Laufzeit-Regeln", len(runtime_entries))
+    col2.metric("Konfigurierte Regeln", configured_rules)
+    col3.metric("Treffer gesamt", total_hits)
+    col4.metric("Geblockt gesamt", total_blocked)
+
+    if runtime_entries:
+        st.markdown(
+            f"**Kurzfazit:** {active_rules} von {len(runtime_entries)} Laufzeit-Regeln hatten Traffic. "
+            f"Geblockte Pakete: **{total_blocked}**."
+        )
+        runtime_df = pd.DataFrame(
+            [
+                {
+                    "Bereich": entry.scope,
+                    "Regel": entry.rule,
+                    "Limit (Pakete)": entry.packets,
+                    "Intervall (s)": entry.interval_seconds,
+                    "Treffer": entry.hits,
+                    "Geblockt": entry.blocked,
+                }
+                for entry in runtime_entries
+            ]
+        ).sort_values(by=["Geblockt", "Treffer"], ascending=False)
+        st.dataframe(runtime_df, use_container_width=True, hide_index=True)
+
+    if config_entries:
+        st.subheader("Konfiguration")
+        config_df = pd.DataFrame(
+            [
+                {
+                    "Name": entry.name,
+                    "Aktiv": "Ja" if entry.enabled else "Nein",
+                    "Interface": entry.iface,
+                    "Regel": entry.rule,
+                    "Pakete": entry.packets,
+                    "Intervall": entry.interval,
+                    "Early": entry.early,
+                }
+                for entry in config_entries
+            ]
+        )
+        st.dataframe(config_df, use_container_width=True, hide_index=True)
 
 
 @st.cache_data(show_spinner=False)
@@ -3337,6 +3475,8 @@ def parse_support_data(text: str) -> dict:
         "voip_accounts": parse_voip_accounts(text),
         "neighbour_clients": parse_neighbour_clients(text),
         "events": parse_events(text),
+        "ratelimiter_runtime": parse_ratelimiter_runtime(text),
+        "ratelimiter_config": parse_ratelimiter_config(text),
         "mesh_topology": parse_mesh_topology(text),
         "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
@@ -3423,6 +3563,8 @@ def build_dashboard(text: str) -> None:
     voip_accounts = parsed["voip_accounts"]
     neighbour_clients = parsed["neighbour_clients"]
     events = parsed["events"]
+    ratelimiter_runtime = parsed["ratelimiter_runtime"]
+    ratelimiter_config = parsed["ratelimiter_config"]
     mesh_topology = parsed["mesh_topology"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
@@ -3453,9 +3595,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Ratelimiter", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:9]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_ratelimiter, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:10]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -3478,6 +3620,9 @@ def build_dashboard(text: str) -> None:
         render_wlan_noisefloor(noisefloor_entries)
         render_wlan_clients(stations)
         render_wlan_radio_load(radio_loads)
+
+    with tab_ratelimiter:
+        render_ratelimiter(ratelimiter_runtime, ratelimiter_config)
 
     with tab_mesh:
         render_mesh_topology(mesh_topology)
