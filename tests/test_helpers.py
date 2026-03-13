@@ -88,5 +88,71 @@ ratelimitwanset:
         self.assertEqual(entries[1].iface, "qos_wan")
 
 
+    def test_parse_hardware_ratelimiter_sessions_extracts_fields(self):
+        text = """accelerator: ratelimiter
+protocol: TCP (6)
+source IPv4: 80.66.224.98
+destination IPv4: 80.72.48.243
+source port: 24267
+destination port: 499
+matched packets: 1457
+matched bytes: 116844
+rule type: ACL IPO
+covered by catchall: yes
+
+accelerator: ratelimiter
+protocol: TCP (6)
+source IPv4: 80.66.224.99
+destination IPv4: 80.72.48.244
+source port: 11111
+destination port: 443
+matched packets: 100
+matched bytes: 5000
+rule type: ACL IPO
+"""
+        sessions = app.parse_hardware_ratelimiter_sessions(text)
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(sessions[0].source_ip, "80.66.224.98")
+        self.assertEqual(sessions[0].destination_port, 499)
+        self.assertTrue(sessions[0].catchall)
+        self.assertEqual(sessions[1].matched_packets, 100)
+
+    def test_analyze_hardware_ratelimiter_sessions_aggregates_and_assesses(self):
+        text = """accelerator: ratelimiter
+source IPv4: 80.66.224.98
+destination IPv4: 80.72.48.243
+source port: 24267
+destination port: 499
+matched packets: 120000
+matched bytes: 116844
+rule type: ACL IPO
+covered by catchall: yes
+
+accelerator: ratelimiter
+source IPv4: 1.2.3.4
+destination IPv4: 80.72.48.243
+destination port: 443
+matched packets: 20
+matched bytes: 1024
+rule type: ACL IPO
+
+accelerator: ratelimiter
+source IPv4: 5.6.7.8
+destination IPv4: 80.72.48.243
+destination port: 80
+matched packets: 30
+matched bytes: 2048
+rule type: ACL IPO
+"""
+        analysis = app.analyze_hardware_ratelimiter_sessions(app.parse_hardware_ratelimiter_sessions(text))
+        self.assertEqual(analysis["summary"]["total_sessions"], 3)
+        self.assertEqual(analysis["summary"]["total_packets"], 120050)
+        self.assertIn("80.66.224.98", analysis["summary"]["unique_sources"])
+        self.assertIn(499, analysis["summary"]["limited_ports"])
+        self.assertIn("Catch-all Rate-Limiter-Regel aktiv.", analysis["assessment"])
+        self.assertIn("Management-Port wird durch Rate-Limiter geschützt.", analysis["assessment"])
+        self.assertIn("Sehr hohe Paketanzahl erkannt, möglicher Flood.", analysis["assessment"])
+
+
 if __name__ == "__main__":
     unittest.main()
