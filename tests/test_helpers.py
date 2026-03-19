@@ -44,6 +44,32 @@ class HelperFunctionTests(unittest.TestCase):
 ##### END SECTION DOCSIS cable spectrum"""
         self.assertEqual(app.parse_cable_spectrum(text), [])
 
+    def test_parse_frequency_range_parses_values(self):
+        self.assertEqual(app._parse_frequency_range("108.975 - 256.975"), (108.975, 256.975))
+        self.assertEqual(app._parse_frequency_range("256.975-108.975"), (108.975, 256.975))
+        self.assertIsNone(app._parse_frequency_range("invalid"))
+
+    def test_build_cable_usage_ranges_contains_docsis_and_plc(self):
+        docsis_data = {
+            "downstream_channels": [{"Frequenz (MHz)": 618.0}],
+            "ofdm_channels": [{"Frequenz (MHz)": "108.975 - 256.975", "PLC Freq (MHz)": 171.0}],
+        }
+        spectrum_points = [
+            {"Frequenz (MHz)": 100.0, "Pegel (dB)": -30.0},
+            {"Frequenz (MHz)": 120.0, "Pegel (dB)": 2.0},
+            {"Frequenz (MHz)": 300.0, "Pegel (dB)": 4.0},
+            {"Frequenz (MHz)": 301.0, "Pegel (dB)": 4.5},
+            {"Frequenz (MHz)": 302.0, "Pegel (dB)": -35.0},
+            {"Frequenz (MHz)": 303.0, "Pegel (dB)": -34.0},
+        ]
+        ranges = app.build_cable_usage_ranges(docsis_data, spectrum_points)
+        categories = {entry["Kategorie"] for entry in ranges}
+        self.assertIn("Verwendeter DOCSIS 3.1-Kanal", categories)
+        self.assertIn("Verwendeter DOCSIS 3.0-Kanal", categories)
+        self.assertIn("PLC", categories)
+        self.assertIn("TV-Signal", categories)
+        self.assertIn("Ausschlussbereich", categories)
+
     def test_parse_ratelimiter_runtime_reads_scope_and_counters(self):
         text = """ratelimitlanset:
    rllan-cfg:
