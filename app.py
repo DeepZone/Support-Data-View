@@ -465,6 +465,9 @@ def summarize_avm_counter_values(sections: List[AvmCounterSection]) -> dict:
             "stale_entries": 0,
             "total_rx": 0,
             "total_tx": 0,
+            "total_traffic": 0,
+            "rx_share_pct": None,
+            "tx_share_pct": None,
             "top_categories": [],
         }
 
@@ -488,6 +491,9 @@ def summarize_avm_counter_values(sections: List[AvmCounterSection]) -> dict:
             }
         )
     top_categories = sorted(category_rows, key=lambda row: row["RX gesamt"] + row["TX gesamt"], reverse=True)
+    total_traffic = total_rx + total_tx
+    rx_share_pct = (total_rx / total_traffic * 100) if total_traffic > 0 else None
+    tx_share_pct = (total_tx / total_traffic * 100) if total_traffic > 0 else None
 
     return {
         "entries": entries,
@@ -495,6 +501,9 @@ def summarize_avm_counter_values(sections: List[AvmCounterSection]) -> dict:
         "stale_entries": stale_entries,
         "total_rx": total_rx,
         "total_tx": total_tx,
+        "total_traffic": total_traffic,
+        "rx_share_pct": rx_share_pct,
+        "tx_share_pct": tx_share_pct,
         "top_categories": top_categories,
     }
 
@@ -3157,16 +3166,28 @@ def render_network_utilization(sections: List[AvmCounterSection]) -> None:
         st.info("Keine auswertbaren Netzauslastungswerte in den AVM-Counter-Daten gefunden.")
         return
 
-    metric_cols = st.columns(4)
+    metric_cols = st.columns(5)
     metric_cols[0].metric("Messpunkte", format_count(summary["total_entries"]))
     metric_cols[1].metric("Stale Datenpunkte (>300s)", format_count(summary["stale_entries"]))
     metric_cols[2].metric("RX gesamt", format_bytes(summary["total_rx"]))
     metric_cols[3].metric("TX gesamt", format_bytes(summary["total_tx"]))
+    metric_cols[4].metric("Gesamtverkehr", format_bytes(summary["total_traffic"]))
+
+    utilization_cols = st.columns(2)
+    rx_share = summary["rx_share_pct"]
+    tx_share = summary["tx_share_pct"]
+    utilization_cols[0].metric("RX-Anteil am Verkehr", f"{rx_share:.1f} %" if rx_share is not None else "-")
+    utilization_cols[1].metric("TX-Anteil am Verkehr", f"{tx_share:.1f} %" if tx_share is not None else "-")
+    st.caption("Netzauslastung in % = Anteil von RX/TX am insgesamt erfassten Verkehr (AVM-Counter).")
 
     top_categories = summary["top_categories"]
     if top_categories:
         category_df = pd.DataFrame(top_categories)
         category_df["Gesamtverkehr"] = category_df["RX gesamt"] + category_df["TX gesamt"]
+        total_traffic = summary["total_traffic"]
+        category_df["Auslastung (%)"] = (
+            (category_df["Gesamtverkehr"] / total_traffic * 100).round(2) if total_traffic > 0 else 0.0
+        )
 
         chart_df = category_df.nlargest(8, "Gesamtverkehr").copy()
         chart_df["RX"] = chart_df["RX gesamt"]
