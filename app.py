@@ -2651,7 +2651,7 @@ def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
         st.info("Keine WLAN-Radio-Load-Daten gefunden.")
         return
 
-    for radio in radio_loads:
+    for index, radio in enumerate(radio_loads):
         with st.expander(format_radio_label(radio.radio_id)):
             if radio.error:
                 st.warning(radio.error)
@@ -2668,7 +2668,11 @@ def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
                 labels={"value": "Auslastung (%)", "variable": "Serie"},
                 title="Auslastung über Zeit",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key=f"wlan_radio_load_{radio.radio_id}_{index}",
+            )
 
 
 def render_lan_ports(ports: List[LanPort]) -> None:
