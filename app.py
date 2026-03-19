@@ -304,6 +304,16 @@ class AvmCounterSection:
     content: str
 
 
+@dataclass
+class AvmCounterValueEntry:
+    category: str
+    metric: str
+    direction: str
+    value: int
+    value_type: str
+    age_seconds: int
+
+
 DEFAULT_DECT_RSSI_INDEX_TO_DBM = {
     1: -92.7,
     2: -94.9,
@@ -409,6 +419,84 @@ def parse_avm_counter_rrd_sections(text: str) -> List[AvmCounterSection]:
         content = "\n".join(lines).strip()
         sections.append(AvmCounterSection(title=title, content=content))
     return sections
+
+
+def parse_avm_counter_values(content: str) -> List[AvmCounterValueEntry]:
+    entries: List[AvmCounterValueEntry] = []
+    current_category: Optional[str] = None
+    category_pattern = re.compile(r"^(?P<category>[a-zA-Z0-9_\-]+):\s*$")
+    value_pattern = re.compile(
+        r"^(?:(?P<direction><<<|>>>)\s+)?(?P<metric>[a-zA-Z0-9_\-]+)\s+"
+        r"(?P<value>-?\d+)\s+(?P<value_type>[CV])\s+\(age\s+(?P<age>\d+)s\)"
+    )
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        category_match = category_pattern.match(stripped)
+        if category_match:
+            current_category = category_match.group("category")
+            continue
+        if not current_category:
+            continue
+        value_match = value_pattern.match(stripped)
+        if not value_match:
+            continue
+        entries.append(
+            AvmCounterValueEntry(
+                category=current_category,
+                metric=value_match.group("metric"),
+                direction=value_match.group("direction") or "",
+                value=int(value_match.group("value")),
+                value_type=value_match.group("value_type"),
+                age_seconds=int(value_match.group("age")),
+            )
+        )
+    return entries
+
+
+def summarize_avm_counter_values(sections: List[AvmCounterSection]) -> dict:
+    values_section = next((section for section in sections if section.title == "rrdtoolapi values"), None)
+    if not values_section:
+        return {
+            "entries": [],
+            "total_entries": 0,
+            "stale_entries": 0,
+            "total_rx": 0,
+            "total_tx": 0,
+            "top_categories": [],
+        }
+
+    entries = parse_avm_counter_values(values_section.content)
+    stale_entries = sum(1 for entry in entries if entry.age_seconds > 300)
+    total_rx = sum(entry.value for entry in entries if entry.direction == "<<<")
+    total_tx = sum(entry.value for entry in entries if entry.direction == ">>>")
+
+    category_rows = []
+    for category in sorted({entry.category for entry in entries}):
+        category_entries = [entry for entry in entries if entry.category == category]
+        category_rows.append(
+            {
+                "Kategorie": category,
+                "Messwerte": len(category_entries),
+                "RX gesamt": sum(item.value for item in category_entries if item.direction == "<<<"),
+                "TX gesamt": sum(item.value for item in category_entries if item.direction == ">>>"),
+                "Werte (V)": sum(1 for item in category_entries if item.value_type == "V"),
+                "Counter (C)": sum(1 for item in category_entries if item.value_type == "C"),
+                "Max. Alter (s)": max((item.age_seconds for item in category_entries), default=0),
+            }
+        )
+    top_categories = sorted(category_rows, key=lambda row: row["RX gesamt"] + row["TX gesamt"], reverse=True)
+
+    return {
+        "entries": entries,
+        "total_entries": len(entries),
+        "stale_entries": stale_entries,
+        "total_rx": total_rx,
+        "total_tx": total_tx,
+        "top_categories": top_categories,
+    }
 
 
 def parse_wlan_stations(text: str) -> List[WifiStation]:
@@ -3064,12 +3152,46 @@ def render_network_utilization(sections: List[AvmCounterSection]) -> None:
         st.info("Keine AVM-Counter-RRD-Daten gefunden.")
         return
 
-    for section in sections:
-        with st.expander(section.title, expanded=False):
-            if section.content:
-                st.code(section.content, language="text")
-            else:
-                st.info("Abschnitt ist vorhanden, enthält aber keine Daten.")
+    summary = summarize_avm_counter_values(sections)
+    if not summary["entries"]:
+        st.info("Keine auswertbaren Netzauslastungswerte in den AVM-Counter-Daten gefunden.")
+        return
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Messpunkte", format_count(summary["total_entries"]))
+    metric_cols[1].metric("Stale Datenpunkte (>300s)", format_count(summary["stale_entries"]))
+    metric_cols[2].metric("RX gesamt", format_bytes(summary["total_rx"]))
+    metric_cols[3].metric("TX gesamt", format_bytes(summary["total_tx"]))
+
+    top_categories = summary["top_categories"]
+    if top_categories:
+        category_df = pd.DataFrame(top_categories)
+        category_df["Gesamtverkehr"] = category_df["RX gesamt"] + category_df["TX gesamt"]
+
+        chart_df = category_df.nlargest(8, "Gesamtverkehr").copy()
+        chart_df["RX"] = chart_df["RX gesamt"]
+        chart_df["TX"] = chart_df["TX gesamt"]
+        melted = chart_df.melt(
+            id_vars=["Kategorie"],
+            value_vars=["RX", "TX"],
+            var_name="Richtung",
+            value_name="Bytes",
+        )
+        fig = px.bar(
+            melted,
+            x="Kategorie",
+            y="Bytes",
+            color="Richtung",
+            barmode="group",
+            title="Top-Kategorien nach aggregiertem Verkehr",
+            labels={"Bytes": "Bytes", "Kategorie": "Kategorie"},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        display_df = category_df.drop(columns=["Gesamtverkehr"]).copy()
+        display_df["RX gesamt"] = display_df["RX gesamt"].apply(format_bytes)
+        display_df["TX gesamt"] = display_df["TX gesamt"].apply(format_bytes)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
 def render_ar7_overview(ar7_overview: Ar7Overview) -> None:

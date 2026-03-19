@@ -130,6 +130,40 @@ state_1
         self.assertEqual(sections[1].content, "value_1")
         self.assertEqual(sections[2].content, "state_1")
 
+    def test_parse_avm_counter_values_extracts_entries(self):
+        content = """nets:
+  <<< rcv_v4_lan 224251990895 C (age 3s) (UID datasource8180)
+  >>> snd_v4_lan 102140772501 C (age 3s) (UID datasource8186)
+cpuusage:
+      idle 96 V (age 3s) (UID datasource8159)
+"""
+        entries = app.parse_avm_counter_values(content)
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[0].category, "nets")
+        self.assertEqual(entries[0].direction, "<<<")
+        self.assertEqual(entries[0].metric, "rcv_v4_lan")
+        self.assertEqual(entries[0].value, 224251990895)
+        self.assertEqual(entries[1].direction, ">>>")
+        self.assertEqual(entries[2].value_type, "V")
+
+    def test_summarize_avm_counter_values_returns_totals(self):
+        sections = [
+            app.AvmCounterSection(
+                title="rrdtoolapi values",
+                content="""nets:
+  <<< rcv_v4_lan 1000 C (age 3s) (UID datasource1)
+  >>> snd_v4_lan 500 C (age 3s) (UID datasource2)
+onlinemonitor_xfrm_0:
+  <<< ds_normal 0 C (age 778540s) (UID datasource3)
+""",
+            )
+        ]
+        summary = app.summarize_avm_counter_values(sections)
+        self.assertEqual(summary["total_entries"], 3)
+        self.assertEqual(summary["total_rx"], 1000)
+        self.assertEqual(summary["total_tx"], 500)
+        self.assertEqual(summary["stale_entries"], 1)
+        self.assertEqual(summary["top_categories"][0]["Kategorie"], "nets")
 
     def test_parse_hardware_ratelimiter_sessions_extracts_fields(self):
         text = """accelerator: ratelimiter
