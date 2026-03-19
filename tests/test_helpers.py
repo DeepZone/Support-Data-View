@@ -113,6 +113,23 @@ ratelimitwanset:
         self.assertFalse(entries[1].enabled)
         self.assertEqual(entries[1].iface, "qos_wan")
 
+    def test_parse_avm_counter_rrd_sections_extracts_requested_sections(self):
+        text = """##### BEGIN SECTION AVM Counter rrdtoolapi names
+name_1
+##### END SECTION AVM Counter rrdtoolapi names
+##### BEGIN SECTION AVM Counter rrdtoolapi values
+value_1
+##### END SECTION AVM Counter rrdtoolapi values
+##### BEGIN SECTION AVM Counter showrrdstate
+state_1
+##### END SECTION AVM Counter showrrdstate
+"""
+        sections = app.parse_avm_counter_rrd_sections(text)
+        self.assertEqual([section.title for section in sections], ["rrdtoolapi names", "rrdtoolapi values", "showrrdstate"])
+        self.assertEqual(sections[0].content, "name_1")
+        self.assertEqual(sections[1].content, "value_1")
+        self.assertEqual(sections[2].content, "state_1")
+
 
     def test_parse_hardware_ratelimiter_sessions_extracts_fields(self):
         text = """accelerator: ratelimiter

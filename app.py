@@ -298,6 +298,12 @@ class Ar7NetworkSettings:
     interfaces: Dict[str, Ar7Interface]
 
 
+@dataclass
+class AvmCounterSection:
+    title: str
+    content: str
+
+
 DEFAULT_DECT_RSSI_INDEX_TO_DBM = {
     1: -92.7,
     2: -94.9,
@@ -384,6 +390,25 @@ def parse_wlan_env_scan(text: str) -> List[WifiNetwork]:
                 )
             )
     return networks
+
+
+def parse_avm_counter_rrd_sections(text: str) -> List[AvmCounterSection]:
+    markers = [
+        ("rrdtoolapi names", "##### BEGIN SECTION AVM Counter rrdtoolapi names"),
+        ("rrdtoolapi values", "##### BEGIN SECTION AVM Counter rrdtoolapi values"),
+        ("showrrdstate", "##### BEGIN SECTION AVM Counter showrrdstate"),
+    ]
+    sections: List[AvmCounterSection] = []
+    for title, marker in markers:
+        section = extract_section_by_prefix(text, marker)
+        if not section:
+            continue
+        lines = section.splitlines()
+        if lines and lines[0].startswith("##### BEGIN SECTION"):
+            lines = lines[1:]
+        content = "\n".join(lines).strip()
+        sections.append(AvmCounterSection(title=title, content=content))
+    return sections
 
 
 def parse_wlan_stations(text: str) -> List[WifiStation]:
@@ -3033,6 +3058,20 @@ def render_port_forwardings(forwardings: List[PortForwarding]) -> None:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
+def render_network_utilization(sections: List[AvmCounterSection]) -> None:
+    st.subheader("Netzauslastung")
+    if not sections:
+        st.info("Keine AVM-Counter-RRD-Daten gefunden.")
+        return
+
+    for section in sections:
+        with st.expander(section.title, expanded=False):
+            if section.content:
+                st.code(section.content, language="text")
+            else:
+                st.info("Abschnitt ist vorhanden, enthält aber keine Daten.")
+
+
 def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
     st.subheader("AR7-Konfiguration")
     if not ar7_overview.mode:
@@ -4070,6 +4109,7 @@ def parse_support_data(text: str) -> dict:
         "mesh_topology": parse_mesh_topology(text),
         "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
+        "network_utilization_sections": parse_avm_counter_rrd_sections(text),
     }
 
 
@@ -4160,6 +4200,7 @@ def build_dashboard(text: str) -> None:
     mesh_topology = parsed["mesh_topology"]
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
+    network_utilization_sections = parsed["network_utilization_sections"]
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -4187,9 +4228,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Anschluss-Performance", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Netzauslastung", "Anschluss-Performance", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_ratelimiter, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:10]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_netzlast, tab_ratelimiter, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:11]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -4212,6 +4253,9 @@ def build_dashboard(text: str) -> None:
         render_wlan_noisefloor(noisefloor_entries)
         render_wlan_clients(stations)
         render_wlan_radio_load(radio_loads)
+
+    with tab_netzlast:
+        render_network_utilization(network_utilization_sections)
 
     with tab_ratelimiter:
         render_ratelimiter(ratelimiter_runtime, ratelimiter_config, ratelimiter_analysis, connection_performance_analysis)
