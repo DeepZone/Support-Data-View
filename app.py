@@ -2013,6 +2013,7 @@ def parse_docsis_channels(text: str) -> dict:
                 "ID": parse_int(row["ID"]),
                 "Aktiv": row["Active"],
                 "Frequenz (MHz)": f"{freq_start:.3f} - {freq_end:.3f}",
+                "PLC Freq (MHz)": parse_channel_float(row["PLC Freq"]),
                 "Power (dBmV)": power,
                 "MER (dB)": mer,
                 "CorrWords": parse_int(row["CorrWords"]) or 0,
@@ -2075,6 +2076,106 @@ def parse_cable_spectrum(text: str) -> List[dict]:
             }
         )
     return points
+
+
+def _parse_frequency_range(value: Optional[str]) -> Optional[Tuple[float, float]]:
+    if value is None:
+        return None
+    match = re.match(r"\s*([\d.]+)\s*-\s*([\d.]+)\s*", str(value))
+    if not match:
+        return None
+    start = parse_channel_float(match.group(1))
+    end = parse_channel_float(match.group(2))
+    if start is None or end is None:
+        return None
+    if end < start:
+        start, end = end, start
+    return (start, end)
+
+
+def build_cable_usage_ranges(docsis_data: dict, spectrum_points: List[dict]) -> List[dict]:
+    ranges: List[dict] = []
+
+    for channel in docsis_data.get("ofdm_channels", []):
+        range_value = _parse_frequency_range(channel.get("Frequenz (MHz)"))
+        if range_value is None:
+            continue
+        ranges.append(
+            {
+                "Kategorie": "Verwendeter DOCSIS 3.1-Kanal",
+                "Start (MHz)": range_value[0],
+                "Ende (MHz)": range_value[1],
+            }
+        )
+
+    downstream_centers = []
+    for channel in docsis_data.get("downstream_channels", []):
+        center = parse_channel_float(channel.get("Frequenz (MHz)"))
+        if center is None:
+            continue
+        downstream_centers.append(center)
+        ranges.append(
+            {
+                "Kategorie": "Verwendeter DOCSIS 3.0-Kanal",
+                "Start (MHz)": max(0.0, center - 4.0),
+                "Ende (MHz)": center + 4.0,
+            }
+        )
+
+    plc_frequencies = []
+    for channel in docsis_data.get("ofdm_channels", []):
+        plc_frequency = parse_channel_float(channel.get("PLC Freq (MHz)"))
+        if plc_frequency is None or plc_frequency <= 0:
+            continue
+        plc_frequencies.append(plc_frequency)
+        ranges.append(
+            {
+                "Kategorie": "PLC",
+                "Start (MHz)": plc_frequency - 0.2,
+                "Ende (MHz)": plc_frequency + 0.2,
+            }
+        )
+
+    occupied_ranges = [
+        (entry["Start (MHz)"], entry["Ende (MHz)"])
+        for entry in ranges
+        if entry["Kategorie"] in {"Verwendeter DOCSIS 3.1-Kanal", "Verwendeter DOCSIS 3.0-Kanal"}
+    ]
+
+    def is_occupied(freq: float) -> bool:
+        return any(start <= freq <= end for start, end in occupied_ranges)
+
+    outside_docsis = []
+    for point in spectrum_points:
+        frequency = parse_channel_float(point.get("Frequenz (MHz)"))
+        level = parse_channel_float(point.get("Pegel (dB)"))
+        if frequency is None or level is None or is_occupied(frequency):
+            continue
+        outside_docsis.append((frequency, level))
+
+    def append_segments(category: str, values: List[Tuple[float, float]], threshold: float, is_tv: bool) -> None:
+        start = None
+        end = None
+        for frequency, level in values:
+            match = level > threshold if is_tv else level <= threshold
+            if match:
+                if start is None:
+                    start = frequency
+                end = frequency
+            elif start is not None and end is not None:
+                ranges.append({"Kategorie": category, "Start (MHz)": start, "Ende (MHz)": end})
+                start = None
+                end = None
+        if start is not None and end is not None:
+            ranges.append({"Kategorie": category, "Start (MHz)": start, "Ende (MHz)": end})
+
+    if outside_docsis:
+        levels = [level for _, level in outside_docsis]
+        threshold = min(-15.0, (sum(levels) / len(levels)) - 5.0)
+        append_segments("TV-Signal", outside_docsis, threshold, is_tv=True)
+        append_segments("Ausschlussbereich", outside_docsis, threshold, is_tv=False)
+
+    return [entry for entry in ranges if entry["Ende (MHz)"] > entry["Start (MHz)"]]
 
 
 def connection_quality_label(rssi: int, quality: int) -> str:
@@ -2498,14 +2599,60 @@ def render_cable_dashboard(docsis_data: dict) -> None:
     spectrum_points = docsis_data.get("spectrum_points", [])
     if spectrum_points:
         spectrum_df = pd.DataFrame(spectrum_points)
-        fig = px.line(
-            spectrum_df,
-            x="Frequenz (MHz)",
-            y="Pegel (dB)",
-            labels={"Frequenz (MHz)": "Frequenz (MHz)", "Pegel (dB)": "Pegel (dB)"},
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=spectrum_df["Frequenz (MHz)"],
+                y=spectrum_df["Pegel (dB)"],
+                mode="lines",
+                name="Sonstiges Signal",
+                line={"color": "#6f6f6f", "width": 1},
+            )
+        )
+
+        usage_ranges = build_cable_usage_ranges(docsis_data, spectrum_points)
+        usage_colors = {
+            "Verwendeter DOCSIS 3.0-Kanal": "#2f7fbf",
+            "Verwendeter DOCSIS 3.1-Kanal": "#4bc0c0",
+            "TV-Signal": "#b7cde2",
+            "Ausschlussbereich": "#d6d6d6",
+            "PLC": "#7a3eb1",
+        }
+        legend_drawn = set()
+        for usage in usage_ranges:
+            category = usage["Kategorie"]
+            color = usage_colors.get(category, "#9f9f9f")
+            show_legend = category not in legend_drawn
+            legend_drawn.add(category)
+            fig.add_vrect(
+                x0=usage["Start (MHz)"],
+                x1=usage["Ende (MHz)"],
+                fillcolor=color,
+                opacity=0.35 if category not in {"PLC", "Ausschlussbereich"} else 0.5,
+                line_width=0,
+            )
+            if show_legend:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[None],
+                        y=[None],
+                        mode="markers",
+                        marker={"size": 12, "symbol": "square", "color": color},
+                        name=category,
+                    )
+                )
+
+        fig.update_layout(
             title="DOCSIS Cable Spektrum",
+            xaxis_title="Frequenz (MHz)",
+            yaxis_title="Pegel (dB)",
         )
         st.plotly_chart(fig, use_container_width=True)
+
+        if usage_ranges:
+            usage_df = pd.DataFrame(usage_ranges).sort_values(["Start (MHz)", "Ende (MHz)"])
+            st.caption("Zuordnung der Frequenzbereiche")
+            st.dataframe(usage_df, use_container_width=True, hide_index=True)
     else:
         st.info("Keine Cable-Spektrumsdaten gefunden.")
 
