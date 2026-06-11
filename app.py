@@ -3914,6 +3914,804 @@ def parse_offload_indicators(text: str) -> Dict[str, int]:
     return {key: value for key, value in indicators.items() if value > 0}
 
 
+
+PPE_MODULE_NAMES = [
+    "qca_nss_ppe",
+    "qca_nss_ppe_qdisc",
+    "qca_nss_ppe_ds",
+    "qca_nss_ppe_lag",
+    "qca_nss_ppe_bridge_mgr",
+    "qca_nss_ppe_pppoe_mgr",
+    "qca_nss_ppe_rule",
+    "qca_nss_ppe_vlan",
+    "qca_nss_ppe_vp",
+    "qca_nss_dp",
+    "qca_ssdk",
+    "offload_pa",
+    "offload_util",
+]
+
+PPE_COUNTER_SEVERITY = {
+    "no free hws": "critical",
+    "offload failed": "warning",
+    "invalid egress mac": "warning",
+    "add/remove vlan dev to ppe err": "critical",
+    "add/remove pppoe dev to ppe err": "critical",
+    "add/remove mac dev to ppe err": "critical",
+    "ppe offload collision": "warning",
+    "dev not registered in ppe": "warning",
+    "fallback offloads": "info",
+}
+
+PPE_INFO_COUNTERS = {
+    "flow flushed by hw",
+    "flow flushed by sw",
+    "created vlan devs",
+    "created mac devs",
+    "created pppoe devs",
+    "max nb of same tuple offload",
+}
+
+
+def _extract_section_containing(text: str, needle: str) -> str:
+    index = text.lower().find(needle.lower())
+    if index == -1:
+        return ""
+    start_index = text.rfind("##### BEGIN SECTION", 0, index)
+    if start_index == -1:
+        start_index = max(0, index - 2000)
+    end_index = text.find("##### END SECTION", index)
+    if end_index == -1:
+        end_index = min(len(text), index + 12000)
+    return text[start_index:end_index]
+
+
+def _extract_ppe_raw_blocks(text: str) -> Dict[str, str]:
+    block_specs = {
+        "brief": "##### BEGIN SECTION brief",
+        "interfaces": "##### BEGIN SECTION interfaces",
+        "synced_sessions": "##### BEGIN SECTION synced_sessions",
+        "caps": "##### BEGIN SECTION caps",
+        "ppe_if_map": "##### BEGIN SECTION ppe_if_map",
+    }
+    blocks = {name: extract_section_by_prefix(text, marker) for name, marker in block_specs.items()}
+    fallbacks = {
+        "brief": "HWPA ppe summary",
+        "interfaces": "PPE device only",
+        "synced_sessions": "HWPA synced sessions",
+        "caps": "MAX HWPA PPE Sessions",
+        "ppe_if_map": "ppe_if_map",
+    }
+    for name, needle in fallbacks.items():
+        if not blocks[name]:
+            blocks[name] = _extract_section_containing(text, needle)
+    return blocks
+
+
+def _parse_ppe_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    value = str(value).strip().rstrip(",;")
+    if not value or value.upper() in {"NULL", "N/A", "-"}:
+        return None
+    try:
+        return int(value, 16) if value.lower().startswith("0x") else int(value)
+    except ValueError:
+        match = re.search(r"-?\d+", value)
+        return int(match.group(0)) if match else None
+
+
+def _classify_ppe_interface(name: str, iface_type: str = "") -> str:
+    lower = name.lower()
+    type_lower = iface_type.lower()
+    if "pppoe" in type_lower or re.search(r"\.p\d+$", lower):
+        return "PPPoE"
+    if "vlan" in type_lower or re.search(r"\.v\d+(?:\.|$)", lower):
+        return "VLAN"
+    if "bridge" in type_lower or lower in {"lan", "guest"} or lower.startswith("br"):
+        return "BRIDGE"
+    if "lag" in type_lower or lower.startswith("bond") or lower.startswith("mld_"):
+        return "LAG"
+    if lower.startswith("ath") or "virtual" in type_lower or lower.startswith("wlan"):
+        return "VIRTUAL/WLAN"
+    if "physical" in type_lower or lower == "wan" or re.match(r"^(eth|ptm|dsl|adsl|wanmodem)\d*", lower):
+        return "PHYSICAL"
+    return "UNKNOWN"
+
+
+def _describe_ppe_role(name: str, category: str) -> str:
+    lower = name.lower()
+    if lower == "wan":
+        return "WAN physisch"
+    if re.match(r"^wan\.v\d+\.p\d+$", lower):
+        return "PPPoE Session auf WAN-VLAN"
+    if re.match(r"^wan\.v\d+$", lower):
+        return "WAN VLAN"
+    if lower == "lan":
+        return "LAN Bridge"
+    if lower == "guest":
+        return "Guest Bridge"
+    if re.match(r"^eth\d+$", lower):
+        return "LAN Port"
+    if re.match(r"^ath\d+$", lower):
+        return "WLAN Interface"
+    if lower.startswith("bond"):
+        return "LAG/Bonding"
+    if lower in {"dsl", "adsl", "ptm0"} or lower.startswith(("dsl", "adsl")):
+        return "DSL Kontext"
+    if category == "VLAN":
+        return "VLAN Device"
+    if category == "PPPoE":
+        return "PPPoE Device"
+    return category.title() if category != "UNKNOWN" else "Unbekannt"
+
+
+def _infer_base_from_name(name: str) -> Optional[str]:
+    if re.search(r"\.p\d+$", name):
+        return re.sub(r"\.p\d+$", "", name)
+    if re.search(r"\.v\d+$", name):
+        return name.split(".v", 1)[0]
+    return None
+
+
+def parse_ppe_if_map(section: str) -> List[dict]:
+    entries: Dict[str, dict] = {}
+    for line in section.splitlines():
+        match = re.match(r"\s*Interface\.(\d+)\.([A-Za-z0-9_]+)\s*=\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        index, key, value = match.groups()
+        entries.setdefault(index, {})[key] = value
+
+    rows: List[dict] = []
+    number_to_name: Dict[int, str] = {}
+    for entry in entries.values():
+        iface_number = _parse_ppe_int(entry.get("iface_number"))
+        name = entry.get("netdev_name", "")
+        if iface_number is not None and name:
+            number_to_name[iface_number] = name
+
+    for entry in sorted(entries.values(), key=lambda item: _parse_ppe_int(item.get("iface_number")) or 0):
+        name = entry.get("netdev_name", "")
+        iface_type = entry.get("iface_type", "")
+        parent_number = _parse_ppe_int(entry.get("parent_iface_number"))
+        parent_name = number_to_name.get(parent_number) if parent_number is not None else None
+        base_device = entry.get("base_dev") or entry.get("base_device") or _infer_base_from_name(name) or parent_name
+        category = _classify_ppe_interface(name, iface_type)
+        rows.append(
+            {
+                "ppe_index": _parse_ppe_int(entry.get("iface_number")),
+                "device_type": iface_type or category,
+                "interface_name": name,
+                "port": _parse_ppe_int(entry.get("port_number")),
+                "parent": parent_name or entry.get("parent_iface_number"),
+                "base_device": base_device,
+                "l3_interface": _parse_ppe_int(entry.get("l3_if_number")),
+                "vsi": _parse_ppe_int(entry.get("vsi_number")),
+                "category": category,
+                "role": _describe_ppe_role(name, category),
+            }
+        )
+    return rows
+
+
+def parse_hwpa_interfaces(section: str) -> List[dict]:
+    rows: List[dict] = []
+    in_table = False
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if in_table:
+                break
+            continue
+        if stripped.startswith("Netdev") and "ppe_ifidx" in stripped:
+            in_table = True
+            continue
+        if not in_table or stripped.startswith("#####") or stripped.startswith("PPE device only"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 8:
+            continue
+        name = parts[0]
+        ppe_ifidx = _parse_ppe_int(parts[3])
+        productive = _is_expected_ppe_netdev(name)
+        if ppe_ifidx is not None and ppe_ifidx >= 0:
+            status = "PPE gemappt"
+            severity = "ok"
+        elif productive:
+            status = "Produktives Interface ohne PPE-Zuordnung"
+            severity = "warning"
+        else:
+            status = "Nicht gemappt (unauffällig)"
+            severity = "neutral"
+        rows.append(
+            {
+                "netdev": name,
+                "type": parts[1],
+                "avm_pid": _parse_ppe_int(parts[2]),
+                "ppe_ifidx": ppe_ifidx,
+                "ppe_port": _parse_ppe_int(parts[4]),
+                "rfs": parts[5],
+                "hwpa_type": parts[7],
+                "status": status,
+                "severity": severity,
+            }
+        )
+    return rows
+
+
+def _is_expected_ppe_netdev(name: str) -> bool:
+    lower = name.lower()
+    ignored = ("lo", "sit", "ip6tnl", "xfrm", "trace", "wifi", "soc", "miireg", "ing", "mld-wifi")
+    if lower.startswith(ignored):
+        return False
+    return bool(
+        lower in {"wan", "lan", "guest"}
+        or re.match(r"^(eth|ath)\d+$", lower)
+        or re.search(r"\.v\d+(?:\.|$)", lower)
+        or re.search(r"\.p\d+$", lower)
+    )
+
+
+def parse_ppe_device_only(section: str) -> List[dict]:
+    marker_index = section.lower().find("ppe device only")
+    if marker_index == -1:
+        return []
+    rows: List[dict] = []
+    lines = section[marker_index:].splitlines()[2:]
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#####"):
+            break
+        parts = stripped.split()
+        if len(parts) < 6:
+            continue
+        name = parts[0]
+        mac = parts[6] if len(parts) >= 7 else ""
+        category = _classify_ppe_interface(name, parts[2])
+        rows.append(
+            {
+                "name": name,
+                "ppe_port": _parse_ppe_int(parts[1]),
+                "type": parts[2],
+                "mtu": _parse_ppe_int(parts[3]),
+                "base_device": None if parts[4] in {"-", "NULL"} else parts[4],
+                "refs": _parse_ppe_int(parts[5]),
+                "mac": mac,
+                "category": category,
+            }
+        )
+    return rows
+
+
+def parse_common_ppe_offload_counters(section: str) -> List[dict]:
+    start = section.lower().find("common ppe offload counter")
+    if start == -1:
+        return []
+    chunk = section[start:]
+    end_match = re.search(r"\n\s*(Accelerator state|Counter per accelerator|Offload counter per pid type)\s*:", chunk, re.IGNORECASE)
+    if end_match:
+        chunk = chunk[: end_match.start()]
+    counters: List[dict] = []
+    for line in chunk.splitlines()[1:]:
+        match = re.match(r"\s*([^:]+?)\s*:\s*(-?\d+)\s*$", line)
+        if not match:
+            continue
+        name = re.sub(r"\s+", " ", match.group(1).strip().lower())
+        value = int(match.group(2))
+        severity = "neutral"
+        if value > 0:
+            severity = PPE_COUNTER_SEVERITY.get(name, "info" if name in PPE_INFO_COUNTERS else "neutral")
+            if name == "ppe offload collision" and value < 10:
+                severity = "info"
+        counters.append({"counter": name, "value": value, "severity": severity})
+    return counters
+
+
+def parse_ppe_summary_and_state(section: str, caps_section: str) -> dict:
+    used_match = re.search(r"used hws\s+(\d+)\s*/\s*(\d+)", section, re.IGNORECASE)
+    max_match = re.search(r"MAX HWPA PPE Sessions\s*:\s*(\d+)", caps_section, re.IGNORECASE)
+    state = {"ipv4": None, "ipv6": None, "ratelimiter": None}
+    state_match = re.search(r"Accelerator state:\s*(.*?)(?:\n\s*\n|\nCounter per accelerator:|\Z)", section, re.IGNORECASE | re.DOTALL)
+    if state_match:
+        for key, value in re.findall(r"^\s*(ratelimiter|ipv6|ipv4)\s*:\s*(\w+)", state_match.group(1), re.IGNORECASE | re.MULTILINE):
+            state[key.lower()] = value.lower()
+    return {
+        "used_hws": int(used_match.group(1)) if used_match else None,
+        "max_hws": int(used_match.group(2)) if used_match else (int(max_match.group(1)) if max_match else None),
+        "accelerator_state": state,
+    }
+
+
+def parse_ppe_sessions(section: str) -> dict:
+    sessions: List[dict] = []
+    blocks = re.split(r"(?=^HWS:\s*)", section, flags=re.MULTILINE)
+    for block in blocks:
+        if not block.strip().startswith("HWS:"):
+            continue
+        session = {"raw": block.strip()}
+        hws_match = re.search(r"^HWS:\s*(\S+)", block, re.MULTILINE)
+        accelerator_match = re.search(r"^accelerator:\s*(.+)$", block, re.MULTILINE | re.IGNORECASE)
+        session["hws"] = hws_match.group(1) if hws_match else ""
+        session["accelerator"] = accelerator_match.group(1).strip() if accelerator_match else "sonstige"
+        for label, key in [
+            ("source IPv4", "source_ip"),
+            ("destination IPv4", "destination_ip"),
+            ("source IPv6", "source_ip"),
+            ("destination IPv6", "destination_ip"),
+            ("source port", "source_port"),
+            ("destination port", "destination_port"),
+            ("protocol", "protocol"),
+        ]:
+            match = re.search(rf"^\s*{re.escape(label)}\s*:\s*(.+)$", block, re.MULTILINE | re.IGNORECASE)
+            if match:
+                session[key] = match.group(1).strip()
+        sessions.append(session)
+    by_type = {"ratelimiter": 0, "ipv4": 0, "ipv6": 0, "sonstige": 0}
+    for session in sessions:
+        accelerator = str(session.get("accelerator", "")).lower()
+        if "ratelimiter" in accelerator:
+            by_type["ratelimiter"] += 1
+        elif "ipv4" in accelerator:
+            by_type["ipv4"] += 1
+        elif "ipv6" in accelerator:
+            by_type["ipv6"] += 1
+        else:
+            by_type["sonstige"] += 1
+    return {"total": len(sessions), "by_type": by_type, "sessions": sessions}
+
+
+def _hex_and_decimal(value: str) -> tuple[str, Optional[int]]:
+    parsed = _parse_ppe_int(value)
+    return (value, parsed)
+
+
+def parse_ppe_mtu_mru(text: str) -> List[dict]:
+    rows: List[dict] = []
+    patterns = [
+        r"port\s*(\d+)\D+mtu\s*[:=]?\s*(0x[0-9a-f]+|\d+)\D+mru\s*[:=]?\s*(0x[0-9a-f]+|\d+)",
+        r"(\d+)\s+(0x[0-9a-f]+|\d+)\s+(0x[0-9a-f]+|\d+)",
+    ]
+    candidate_lines = [line.strip() for line in text.splitlines() if re.search(r"\b(MTU|MRU)\b", line, re.IGNORECASE)]
+    for line in candidate_lines:
+        if not re.search(r"\bport\b", line, re.IGNORECASE) and not re.match(r"^\d+\s+", line):
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if not match:
+                continue
+            port, mtu_raw, mru_raw = match.groups()[:3]
+            mtu_hex, mtu_dec = _hex_and_decimal(mtu_raw)
+            mru_hex, mru_dec = _hex_and_decimal(mru_raw)
+            assessment = "Normal" if mtu_dec == 1500 and mru_dec == 1500 else "Hinweis"
+            if mtu_dec == 1508 or mru_dec == 1508:
+                assessment = "VLAN/PPPoE/RFC4638-Kontext möglich"
+            elif (mtu_dec is not None and mtu_dec < 1400) or (mru_dec is not None and mru_dec < 1400):
+                assessment = "Ungewöhnlich niedrig"
+            elif (mtu_dec is not None and mtu_dec > 9000) or (mru_dec is not None and mru_dec > 9000):
+                assessment = "Ungewöhnlich hoch"
+            rows.append({"port": int(port), "mtu_hex": mtu_hex, "mtu_decimal": mtu_dec, "mru_hex": mru_hex, "mru_decimal": mru_dec, "assessment": assessment})
+            break
+    return rows
+
+
+def parse_ppe_flow_control(text: str) -> List[dict]:
+    rows: List[dict] = []
+    for line in text.splitlines():
+        if not re.search(r"flow[- ]?control|flow control|Illegal value", line, re.IGNORECASE):
+            continue
+        port_match = re.search(r"port\s*(\d+)", line, re.IGNORECASE)
+        if not port_match:
+            continue
+        status_match = re.search(r"(?:status|flow[- ]?control)\s*[:=]?\s*([A-Za-z _-]+|Illegal value)", line, re.IGNORECASE)
+        status = status_match.group(1).strip() if status_match else line.strip()
+        assessment = "Hinweis: Illegal value" if "illegal value" in line.lower() else "Normal / informativ"
+        rows.append({"port": int(port_match.group(1)), "status": status, "assessment": assessment})
+    return rows
+
+
+def parse_ppe_portshaper(text: str, ppe_devices: List[dict]) -> List[dict]:
+    rows: List[dict] = []
+    port_to_name = {row.get("port"): row.get("interface_name") for row in ppe_devices if row.get("port") is not None}
+    for line in text.splitlines():
+        if not re.search(r"port\s*shaper|portshaper", line, re.IGNORECASE):
+            continue
+        port_match = re.search(r"port\s*(\d+)", line, re.IGNORECASE)
+        if not port_match:
+            continue
+        port = int(port_match.group(1))
+        active = bool(re.search(r"\b(enable|enabled|active|on|yes)\b", line, re.IGNORECASE)) and not bool(re.search(r"\b(disable|disabled|off|no)\b", line, re.IGNORECASE))
+        cir_match = re.search(r"\bCIR\s*[:=]?\s*(0x[0-9a-f]+|\d+)", line, re.IGNORECASE)
+        cbs_match = re.search(r"\bCBS\s*[:=]?\s*(0x[0-9a-f]+|\d+)", line, re.IGNORECASE)
+        frame_match = re.search(r"frame(?: mode)?\s*[:=]?\s*([A-Za-z0-9_-]+)", line, re.IGNORECASE)
+        cir_raw = cir_match.group(1) if cir_match else ""
+        cbs_raw = cbs_match.group(1) if cbs_match else ""
+        iface = port_to_name.get(port, "")
+        is_wan = iface.lower().startswith("wan") if iface else False
+        assessment = "WAN-Portshaper aktiv" if active and is_wan else ("Aktiv" if active else "Inaktiv")
+        rows.append(
+            {
+                "port": port,
+                "interface": iface,
+                "active": active,
+                "cir_hex": cir_raw,
+                "cir_decimal": _parse_ppe_int(cir_raw),
+                "cbs_hex": cbs_raw,
+                "cbs_decimal": _parse_ppe_int(cbs_raw),
+                "frame_mode": frame_match.group(1) if frame_match else "",
+                "assessment": assessment,
+            }
+        )
+    return rows
+
+
+def parse_ppe_kernel_modules(text: str) -> List[dict]:
+    found: Dict[str, dict] = {}
+    module_pattern = re.compile(r"^([A-Za-z0-9_]+)\s+(\d+)\s+(\S+)(?:\s+(.+))?$", re.MULTILINE)
+    for match in module_pattern.finditer(text):
+        name, size, used_count, used_by = match.groups()
+        if name in PPE_MODULE_NAMES:
+            found[name] = {"module": name, "size": int(size), "used_by": (used_by or used_count).strip(), "detected": True}
+    return [found.get(name, {"module": name, "size": None, "used_by": "", "detected": False}) for name in PPE_MODULE_NAMES]
+
+
+def build_ppe_device_tree(devices: List[dict]) -> List[str]:
+    names = {row.get("interface_name") for row in devices if row.get("interface_name")}
+    children: Dict[str, List[str]] = {name: [] for name in names}
+    for row in devices:
+        name = row.get("interface_name")
+        parent = row.get("base_device") or row.get("parent")
+        if name and parent in names and parent != name:
+            children.setdefault(parent, []).append(name)
+    child_names = {child for values in children.values() for child in values}
+    roots = sorted(names - child_names)
+
+    lines: List[str] = []
+
+    def walk(node: str, prefix: str = "") -> None:
+        lines.append(f"{prefix}{node}")
+        node_children = sorted(children.get(node, []))
+        for idx, child in enumerate(node_children):
+            branch = "└─ " if idx == len(node_children) - 1 else "├─ "
+            walk(child, prefix + branch)
+
+    for root in roots:
+        walk(root)
+    return lines
+
+
+def _severity_rank(severity: str) -> int:
+    return {"ok": 0, "neutral": 0, "info": 1, "warning": 2, "critical": 3}.get(severity, 0)
+
+
+def _severity_label(severity: str) -> str:
+    return {"ok": "OK", "neutral": "OK", "info": "Hinweis", "warning": "Warnung", "critical": "Kritisch"}.get(severity, severity)
+
+
+def _analyze_ppe_diagnosis(data: dict) -> dict:
+    findings: List[dict] = []
+    severity = "ok"
+    modules = data["modules"]
+    qca_nss_ppe_loaded = any(row["module"] == "qca_nss_ppe" and row["detected"] for row in modules)
+    ppe_submodules_loaded = any(row["module"].startswith("qca_nss_ppe_") and row["detected"] for row in modules)
+
+    if data["ppe_detected"] and not data["sessions"].get("total"):
+        findings.append({"severity": "info", "message": "PPE erkannt, aber keine aktiven HWPA/PPE-Sessions gefunden."})
+    if qca_nss_ppe_loaded and not data["raw_blocks"].get("brief"):
+        findings.append({"severity": "critical", "message": "qca_nss_ppe ist geladen, aber der HWPA/PPE-Brief-Block fehlt."})
+    if qca_nss_ppe_loaded and not data["raw_blocks"].get("ppe_if_map"):
+        findings.append({"severity": "critical", "message": "qca_nss_ppe ist geladen, aber ppe_if_map fehlt."})
+    if ppe_submodules_loaded and not qca_nss_ppe_loaded:
+        findings.append({"severity": "info", "message": "qca_nss_ppe_* Module wurden gefunden, qca_nss_ppe selbst aber nicht."})
+
+    counter_by_name = {row["counter"]: row for row in data["counters"]}
+    for name in ["offload failed", "ppe offload collision", "dev not registered in ppe", "no free hws", "invalid egress mac", "fallback offloads"]:
+        row = counter_by_name.get(name)
+        if row and row["value"] > 0:
+            findings.append({"severity": row["severity"], "message": f"Counter '{name}' ist {row['value']}."})
+    for name in ["add/remove vlan dev to ppe err", "add/remove pppoe dev to ppe err", "add/remove mac dev to ppe err"]:
+        row = counter_by_name.get(name)
+        if row and row["value"] > 0:
+            findings.append({"severity": "critical", "message": f"Registrierungsfehler: '{name}' ist {row['value']}."})
+
+    if any(row.get("severity") == "warning" for row in data["hwpa_interfaces"]):
+        findings.append({"severity": "warning", "message": "Mindestens ein produktives Interface hat ppe_ifidx -1."})
+
+    has_vlan = data["counts"]["vlan_devices"] > 0
+    has_pppoe = data["counts"]["pppoe_devices"] > 0
+    module_detected = {row["module"]: row["detected"] for row in modules}
+    if has_vlan and not module_detected.get("qca_nss_ppe_vlan"):
+        findings.append({"severity": "warning", "message": "VLAN-Devices erkannt, aber qca_nss_ppe_vlan fehlt."})
+    if has_pppoe and not module_detected.get("qca_nss_ppe_pppoe_mgr"):
+        findings.append({"severity": "warning", "message": "PPPoE-Devices erkannt, aber qca_nss_ppe_pppoe_mgr fehlt."})
+
+    for row in data["portshaper"]:
+        if row.get("assessment") == "WAN-Portshaper aktiv":
+            findings.append({"severity": "info", "message": "Auf dem WAN-Port ist ein PPE-Portshaper aktiv. Das kann für Upstream-Shaping oder Providerprofile relevant sein."})
+
+    if not data["ppe_detected"]:
+        findings.append({"severity": "info", "message": "Keine PPE/HWPA-Daten in den Supportdaten gefunden."})
+
+    for finding in findings:
+        if _severity_rank(finding["severity"]) > _severity_rank(severity):
+            severity = finding["severity"]
+    label = _severity_label(severity)
+    return {"overall": label, "severity": severity, "findings": findings}
+
+
+def _build_ppe_developer_summary(data: dict) -> str:
+    assessment = data["assessment"]
+    state = data["summary"].get("accelerator_state", {})
+    active_bits = [name.upper() for name in ["ipv4", "ipv6", "ratelimiter"] if state.get(name) == "enabled"]
+    if not data["ppe_detected"]:
+        return "PPE/HWPA wurde in den Supportdaten nicht eindeutig erkannt. PPE-spezifische Blöcke oder qca_nss_ppe Module fehlen."
+    device_parts = []
+    counts = data["counts"]
+    if counts["physical_ports"]:
+        device_parts.append("physische Ports")
+    if counts["bridge_devices"]:
+        device_parts.append("Bridge Devices")
+    if counts["vlan_devices"]:
+        device_parts.append("VLAN Devices")
+    if counts["pppoe_devices"]:
+        device_parts.append("PPPoE Devices")
+    session_text = "Aktive Hardware Sessions sind vorhanden." if data["sessions"].get("total") else "Aktive Hardware Sessions wurden nicht gefunden."
+    if assessment["severity"] in {"warning", "critical"}:
+        relevant = ", ".join(f["message"] for f in assessment["findings"] if f["severity"] in {"warning", "critical"})
+        return (
+            "PPE/HWPA ist aktiv, jedoch wurden Offload- oder Registrierungsauffälligkeiten erkannt. "
+            f"Aktive Accelerator: {', '.join(active_bits) if active_bits else 'k.A.'}. "
+            f"Bitte Counter und Device-Zuordnung prüfen: {relevant}. "
+            "Die registrierten Devices und die WAN-Kette sollten gegen die erwartete Providerkonfiguration geprüft werden."
+        )
+    return (
+        "PPE/HWPA ist aktiv. Registrierte Interfaces wurden gefunden. "
+        f"Sichtbar sind {', '.join(device_parts) if device_parts else 'keine klassifizierten Device-Rollen'}. "
+        "Es wurden keine relevanten Offload- oder Registrierungsfehler gezählt. "
+        f"{session_text} Aus PPE-Sicht kein offensichtlicher Registrierungsfehler erkennbar."
+    )
+
+
+def parse_ppe_diagnosis(text: str) -> dict:
+    raw_blocks = _extract_ppe_raw_blocks(text)
+    modules = parse_ppe_kernel_modules(text)
+    ppe_devices = parse_ppe_if_map(raw_blocks.get("ppe_if_map", ""))
+    hwpa_interfaces = parse_hwpa_interfaces(raw_blocks.get("interfaces", ""))
+    device_only = parse_ppe_device_only(raw_blocks.get("interfaces", ""))
+    counters = parse_common_ppe_offload_counters(raw_blocks.get("brief", ""))
+    summary = parse_ppe_summary_and_state(raw_blocks.get("brief", ""), raw_blocks.get("caps", ""))
+    sessions = parse_ppe_sessions(raw_blocks.get("synced_sessions", ""))
+    mtu_mru = parse_ppe_mtu_mru(text)
+    flow_control = parse_ppe_flow_control(text)
+    portshaper = parse_ppe_portshaper(text, ppe_devices)
+    ppe_detected = bool(ppe_devices or counters or raw_blocks.get("ppe_if_map") or any(row["detected"] and "ppe" in row["module"] for row in modules))
+    hwpa_detected = bool(raw_blocks.get("brief") or raw_blocks.get("interfaces") or sessions.get("total") or re.search(r"\bHWPA\b", text, re.IGNORECASE))
+    combined_devices = ppe_devices + [
+        {"category": row.get("category"), "interface_name": row.get("name"), "port": row.get("ppe_port")}
+        for row in device_only
+    ]
+    counts = {
+        "registered_devices": len(ppe_devices),
+        "vlan_devices": sum(1 for row in combined_devices if row.get("category") == "VLAN"),
+        "pppoe_devices": sum(1 for row in combined_devices if row.get("category") == "PPPoE"),
+        "bridge_devices": sum(1 for row in combined_devices if row.get("category") == "BRIDGE"),
+        "physical_ports": sum(1 for row in combined_devices if row.get("category") == "PHYSICAL"),
+    }
+    data = {
+        "ppe_detected": ppe_detected,
+        "hwpa_detected": hwpa_detected,
+        "summary": summary,
+        "counts": counts,
+        "ppe_devices": ppe_devices,
+        "device_tree": build_ppe_device_tree(ppe_devices),
+        "hwpa_interfaces": hwpa_interfaces,
+        "device_only": device_only,
+        "device_chains": [f"{row['name']} hängt auf {row['base_device']}" for row in device_only if row.get("base_device")],
+        "counters": counters,
+        "sessions": sessions,
+        "mtu_mru": mtu_mru,
+        "flow_control": flow_control,
+        "portshaper": portshaper,
+        "modules": modules,
+        "raw_blocks": {key: value for key, value in raw_blocks.items() if value},
+    }
+    data["assessment"] = _analyze_ppe_diagnosis(data)
+    data["developer_summary"] = _build_ppe_developer_summary(data)
+    return data
+
+
+def _ppe_dataframe(rows: List[dict], columns: Dict[str, str]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=list(columns.values()))
+    return pd.DataFrame([{label: row.get(key, "") for key, label in columns.items()} for row in rows])
+
+
+def _render_missing_ppe_section(name: str) -> None:
+    st.info(f"{name}: Nicht in den Supportdaten gefunden.")
+
+
+def render_ppe_diagnosis(data: dict) -> None:
+    st.subheader("PPE Diagnose / Packet Processing Engine")
+    assessment = data["assessment"]
+    severity_to_icon = {"ok": "✅", "info": "ℹ️", "warning": "⚠️", "critical": "🛑"}
+    st.markdown(f"### {severity_to_icon.get(assessment['severity'], 'ℹ️')} Gesamtbewertung: {assessment['overall']}")
+
+    state = data["summary"].get("accelerator_state", {})
+    metrics = [
+        ("PPE erkannt", "Ja" if data["ppe_detected"] else "Nein"),
+        ("HWPA erkannt", "Ja" if data["hwpa_detected"] else "Nein"),
+        ("IPv4", state.get("ipv4") or "k.A."),
+        ("IPv6", state.get("ipv6") or "k.A."),
+        ("Ratelimiter", state.get("ratelimiter") or "k.A."),
+        ("HW Sessions", f"{data['summary'].get('used_hws') if data['summary'].get('used_hws') is not None else data['sessions'].get('total', 0)} / {data['summary'].get('max_hws') or 'k.A.'}"),
+        ("PPE Devices", data["counts"]["registered_devices"]),
+        ("VLAN / PPPoE", f"{data['counts']['vlan_devices']} / {data['counts']['pppoe_devices']}"),
+        ("Bridge / Ports", f"{data['counts']['bridge_devices']} / {data['counts']['physical_ports']}"),
+    ]
+    for row_start in range(0, len(metrics), 3):
+        cols = st.columns(3)
+        for col, (label, value) in zip(cols, metrics[row_start : row_start + 3]):
+            col.metric(label, value)
+
+    if assessment["findings"]:
+        for finding in assessment["findings"]:
+            message = finding["message"]
+            if finding["severity"] == "critical":
+                st.error(message)
+            elif finding["severity"] == "warning":
+                st.warning(message)
+            else:
+                st.info(message)
+
+    st.markdown("### Filter")
+    f1, f2, f3, f4 = st.columns(4)
+    only_errors = f1.checkbox("Nur Fehler anzeigen", key="ppe_filter_errors")
+    only_registered = f2.checkbox("Nur registrierte PPE Devices", key="ppe_filter_registered")
+    only_wan = f3.checkbox("Nur WAN-relevant", key="ppe_filter_wan")
+    only_vlan_pppoe = f4.checkbox("Nur VLAN/PPPoE", key="ppe_filter_vlan_pppoe")
+
+    st.markdown("### Registrierte PPE Devices")
+    devices = data["ppe_devices"]
+    if only_wan:
+        devices = [row for row in devices if "wan" in str(row.get("interface_name", "")).lower() or "wan" in str(row.get("role", "")).lower()]
+    if only_vlan_pppoe:
+        devices = [row for row in devices if row.get("category") in {"VLAN", "PPPoE"}]
+    if devices:
+        st.dataframe(
+            _ppe_dataframe(
+                devices,
+                {
+                    "ppe_index": "PPE Index",
+                    "device_type": "Device Type",
+                    "interface_name": "Interface Name",
+                    "port": "Port",
+                    "parent": "Parent",
+                    "base_device": "Base Device",
+                    "l3_interface": "L3 Interface",
+                    "vsi": "VSI",
+                    "category": "Badge",
+                    "role": "Rolle/Einschätzung",
+                },
+            ),
+            use_container_width=True,
+        )
+        if data["device_tree"]:
+            st.markdown("**Abgeleitete Device-Baumansicht**")
+            st.code("\n".join(data["device_tree"]), language="text")
+    else:
+        _render_missing_ppe_section("ppe_if_map")
+
+    st.markdown("### HWPA Interface Tabelle")
+    hwpa_rows = data["hwpa_interfaces"]
+    if only_errors:
+        hwpa_rows = [row for row in hwpa_rows if row.get("severity") in {"warning", "critical"}]
+    if only_registered:
+        hwpa_rows = [row for row in hwpa_rows if (row.get("ppe_ifidx") or -1) >= 0]
+    if only_wan:
+        hwpa_rows = [row for row in hwpa_rows if "wan" in row.get("netdev", "").lower()]
+    if only_vlan_pppoe:
+        hwpa_rows = [row for row in hwpa_rows if _classify_ppe_interface(row.get("netdev", "")) in {"VLAN", "PPPoE"}]
+    if hwpa_rows:
+        st.dataframe(
+            _ppe_dataframe(hwpa_rows, {"netdev": "Netdev", "avm_pid": "avm_pid", "ppe_ifidx": "ppe_ifidx", "ppe_port": "ppe_port", "rfs": "RFS", "hwpa_type": "HWPA Type", "status": "Status"}),
+            use_container_width=True,
+        )
+    else:
+        _render_missing_ppe_section("HWPA Interface Liste")
+
+    st.markdown("### PPE Device Only")
+    if data["device_only"]:
+        st.dataframe(
+            _ppe_dataframe(data["device_only"], {"name": "Name", "ppe_port": "PPE Index / Port", "type": "Typ", "mtu": "MTU", "base_device": "Base Device", "refs": "Refcount", "mac": "MAC-Adresse"}),
+            use_container_width=True,
+        )
+        if data["device_chains"]:
+            st.markdown("**Erkannte Ketten**")
+            st.code("\n".join(data["device_chains"]), language="text")
+    else:
+        _render_missing_ppe_section("PPE device only")
+
+    st.markdown("### Offload Counter / Fehlerbewertung")
+    counters = data["counters"]
+    if only_errors:
+        counters = [row for row in counters if row.get("severity") in {"info", "warning", "critical"}]
+    if counters:
+        st.dataframe(_ppe_dataframe(counters, {"counter": "Counter", "value": "Wert", "severity": "Bewertung"}), use_container_width=True)
+    else:
+        _render_missing_ppe_section("Common PPE offload counter")
+
+    st.markdown("### Aktive HWPA/PPE Sessions")
+    sessions = data["sessions"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Gesamt", sessions.get("total", 0))
+    c2.metric("Ratelimiter", sessions.get("by_type", {}).get("ratelimiter", 0))
+    c3.metric("IPv4 / IPv6", f"{sessions.get('by_type', {}).get('ipv4', 0)} / {sessions.get('by_type', {}).get('ipv6', 0)}")
+    c4.metric("Sonstige", sessions.get("by_type", {}).get("sonstige", 0))
+    anonymize = st.checkbox("Session-IP-Adressen anonymisieren", value=True, key="ppe_anonymize_sessions")
+    session_rows = []
+    for session in sessions.get("sessions", []):
+        row = {key: session.get(key, "") for key in ["hws", "accelerator", "source_ip", "destination_ip", "source_port", "destination_port", "protocol"]}
+        if anonymize:
+            for key in ["source_ip", "destination_ip"]:
+                if row.get(key):
+                    row[key] = _anonymize_ip(row[key])
+        session_rows.append(row)
+    if session_rows:
+        st.dataframe(pd.DataFrame(session_rows), use_container_width=True)
+    else:
+        _render_missing_ppe_section("HWPA Sessions")
+
+    detail_tabs = st.tabs(["MTU/MRU", "Flow Control", "Portshaper", "Kernelmodule"])
+    with detail_tabs[0]:
+        if data["mtu_mru"]:
+            st.dataframe(_ppe_dataframe(data["mtu_mru"], {"port": "Port", "mtu_hex": "MTU hex", "mtu_decimal": "MTU dezimal", "mru_hex": "MRU hex", "mru_decimal": "MRU dezimal", "assessment": "Bewertung"}), use_container_width=True)
+        else:
+            _render_missing_ppe_section("PPE MTU / MRU")
+    with detail_tabs[1]:
+        if data["flow_control"]:
+            st.dataframe(_ppe_dataframe(data["flow_control"], {"port": "Port", "status": "Status", "assessment": "Bewertung"}), use_container_width=True)
+        else:
+            _render_missing_ppe_section("PPE Flow Control")
+    with detail_tabs[2]:
+        if data["portshaper"]:
+            st.dataframe(_ppe_dataframe(data["portshaper"], {"port": "Port", "interface": "Interface", "active": "Shaper aktiv", "cir_hex": "CIR hex", "cir_decimal": "CIR dezimal", "cbs_hex": "CBS hex", "cbs_decimal": "CBS dezimal", "frame_mode": "Frame Mode", "assessment": "Einschätzung"}), use_container_width=True)
+        else:
+            _render_missing_ppe_section("PPE Portshaper")
+    with detail_tabs[3]:
+        st.dataframe(_ppe_dataframe(data["modules"], {"module": "Modulname", "size": "Größe", "used_by": "Used by", "detected": "Status erkannt"}), use_container_width=True)
+
+    st.markdown("### Diagnose-Text / Entwicklerzusammenfassung")
+    summary = data["developer_summary"]
+    st.code(summary, language="text")
+    components.html(
+        f"""
+        <button onclick="navigator.clipboard.writeText({json.dumps(summary)}); this.textContent='Kopiert'; setTimeout(() => this.textContent='Entwicklerzusammenfassung kopieren', 1500);">
+            Entwicklerzusammenfassung kopieren
+        </button>
+        """,
+        height=45,
+    )
+
+    with st.expander("Aufklappbare Rohdatenblöcke"):
+        if data["raw_blocks"]:
+            for name, raw in data["raw_blocks"].items():
+                st.markdown(f"**{name}**")
+                st.code(raw[:20000], language="text")
+        else:
+            st.info("Keine PPE-Rohdatenblöcke gefunden.")
+
+
+def _anonymize_ip(value: str) -> str:
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return value
+    if ip.version == 4:
+        parts = value.split(".")
+        return ".".join(parts[:2] + ["x", "x"])
+    groups = value.split(":")
+    return ":".join(groups[:3] + ["…"])
+
 def analyze_connection_performance(
     runtime_entries: List[RatelimiterRuntimeEntry],
     config_entries: List[RatelimiterConfigEntry],
@@ -4253,6 +5051,7 @@ def parse_support_data(text: str) -> dict:
         "dect_devices": parse_dect_device_info(text, dect_rssi_index_to_dbm),
         "dect_basis_info": parse_dect_basis_info(text),
         "network_utilization_sections": parse_avm_counter_rrd_sections(text),
+        "ppe_diagnosis": parse_ppe_diagnosis(text),
     }
 
 
@@ -4344,6 +5143,7 @@ def build_dashboard(text: str) -> None:
     dect_devices = parsed["dect_devices"]
     dect_basis_info = parsed["dect_basis_info"]
     network_utilization_sections = parsed["network_utilization_sections"]
+    ppe_diagnosis = parsed["ppe_diagnosis"]
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
@@ -4371,9 +5171,9 @@ def build_dashboard(text: str) -> None:
         unsafe_allow_html=True,
     )
 
-    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Netzauslastung", "Anschluss-Performance", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
+    tab_names = [access_technology, "Internet", "LAN", "WLAN", "Netzauslastung", "PPE Diagnose", "Anschluss-Performance", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
     tabs = st.tabs(tab_names)
-    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_netzlast, tab_ratelimiter, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:11]
+    tab_dsl, tab_internet, tab_lan, tab_wlan, tab_netzlast, tab_ppe, tab_ratelimiter, tab_mesh, tab_phone, tab_dect, tab_ar7, tab_events = tabs[:12]
     with tab_dsl:
         if access_technology == "Cable":
             render_cable_dashboard(docsis_data)
@@ -4399,6 +5199,9 @@ def build_dashboard(text: str) -> None:
 
     with tab_netzlast:
         render_network_utilization(network_utilization_sections)
+
+    with tab_ppe:
+        render_ppe_diagnosis(ppe_diagnosis)
 
     with tab_ratelimiter:
         render_ratelimiter(ratelimiter_runtime, ratelimiter_config, ratelimiter_analysis, connection_performance_analysis)
