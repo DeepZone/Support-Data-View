@@ -347,3 +347,146 @@ matched bytes: 5000
 
 if __name__ == "__main__":
     unittest.main()
+
+class PpeDiagnosisParserTests(unittest.TestCase):
+    SAMPLE_FULL_PPE = """
+qca_nss_ppe_qdisc      90112  0
+qca_nss_ppe_pppoe_mgr    16384  1 offload_pa
+qca_nss_ppe_vlan       45056  3 offload_pa,qca_nss_ppe_bridge_mgr,qca_nss_ppe_lag
+qca_nss_dp            139264  2 qca_nss_ppe_ds,qca_nss_ppe_vp
+qca_nss_ppe           385024  12 offload_pa,qca_nss_ppe_vlan
+qca_ssdk             1871872  4 offload_pa,qca_nss_dp,qca_nss_ppe
+offload_pa            548864  0
+offload_util           16384  1 offload_pa
+##### BEGIN SECTION brief
+HWPA ppe summary:
+used hws 5 / 8192
+free hws 8187 / 8192
+
+Common PPE offload counter:
+  no free hws     : 0
+  offload failed  : 0
+  flow flushed by hw: 10
+  fallback offloads: 0
+  dev not registered in ppe: 0
+  ppe offload collision: 0
+  add/remove vlan dev to ppe err: 0
+  add/remove pppoe dev to ppe err: 0
+  add/remove mac dev to ppe err: 0
+
+Accelerator state:
+  ratelimiter: enabled
+  ipv6: enabled
+  ipv4: enabled
+##### END SECTION brief
+##### BEGIN SECTION interfaces
+Netdev              type      avm_pid   ppe_ifidx ppe_port  rfs   vp_dev    hwpa_type mht_bmp
+lo                  772       0         -1        -1        no    NULL      0         0
+wan                 1         10        5         6         no    NULL      1         0
+lan                 1         0         7         -1        no    NULL      0         0
+ath0                1         14        10        64        yes   NULL      3         0
+PPE device only
+Name                ppe_port  Type      MTU       Base-Dev  Refs      MAC
+wan.v882            6         VLAN      1508      wan       2         aa:bb:cc:dd:ee:ff
+wan.v882.p1         6         PPPoE     1500      wan.v882  1         aa:bb:cc:dd:ee:01
+##### END SECTION interfaces
+##### BEGIN SECTION synced_sessions
+HWPA synced sessions
+HWS: 3f576a90
+accelerator: ratelimiter
+source IPv4: 192.0.2.10
+destination IPv4: 198.51.100.20
+source port: 12345
+destination port: 443
+##### END SECTION synced_sessions
+##### BEGIN SECTION caps
+MAX HWPA PPE Sessions: 8192
+##### END SECTION caps
+##### BEGIN SECTION ppe_if_map (via mknod)
+Interface.5.iface_number=5
+Interface.5.iface_type=PHYSICAL
+Interface.5.netdev_name=wan
+Interface.5.port_number=6
+Interface.5.l3_if_number=5
+
+Interface.7.iface_number=7
+Interface.7.iface_type=BRIDGE
+Interface.7.netdev_name=lan
+Interface.7.vsi_number=0
+Interface.7.l3_if_number=7
+
+Interface.13.iface_number=13
+Interface.13.parent_iface_number=5
+Interface.13.iface_type=VLAN
+Interface.13.netdev_name=wan.v882
+Interface.13.port_number=6
+Interface.13.l3_if_number=13
+
+Interface.14.iface_number=14
+Interface.14.parent_iface_number=13
+Interface.14.iface_type=PPPoE
+Interface.14.netdev_name=wan.v882.p1
+Interface.14.port_number=6
+Interface.14.l3_if_number=14
+##### END SECTION ppe_if_map (via mknod)
+port 6 MTU 0x05e4 MRU 0x05e4
+port 6 flow control status Illegal value
+portshaper port 6 enabled CIR 0x100 CBS 0x20 frame mode L2
+"""
+
+    def test_parse_ppe_full_supportdata_extracts_overview(self):
+        data = app.parse_ppe_diagnosis(self.SAMPLE_FULL_PPE)
+        self.assertTrue(data["ppe_detected"])
+        self.assertTrue(data["hwpa_detected"])
+        self.assertEqual(data["summary"]["used_hws"], 5)
+        self.assertEqual(data["summary"]["max_hws"], 8192)
+        self.assertEqual(data["summary"]["accelerator_state"]["ipv4"], "enabled")
+        self.assertEqual(data["counts"]["registered_devices"], 4)
+        self.assertEqual(data["sessions"]["by_type"]["ratelimiter"], 1)
+
+    def test_parse_ppe_without_ppe_is_safe(self):
+        data = app.parse_ppe_diagnosis("ordinary support data without acceleration")
+        self.assertFalse(data["ppe_detected"])
+        self.assertEqual(data["assessment"]["overall"], "Hinweis")
+        self.assertEqual(data["counts"]["registered_devices"], 0)
+
+    def test_parse_ppe_vlan_pppoe_and_tree(self):
+        data = app.parse_ppe_diagnosis(self.SAMPLE_FULL_PPE)
+        self.assertEqual(data["counts"]["vlan_devices"], 2)
+        self.assertEqual(data["counts"]["pppoe_devices"], 2)
+        self.assertIn("wan.v882 hängt auf wan", data["device_chains"])
+        self.assertTrue(any("wan.v882.p1" in line for line in data["device_tree"]))
+
+    def test_parse_ppe_error_counters_raise_warning_or_critical(self):
+        text = self.SAMPLE_FULL_PPE.replace("offload failed  : 0", "offload failed  : 3").replace("add/remove vlan dev to ppe err: 0", "add/remove vlan dev to ppe err: 1")
+        data = app.parse_ppe_diagnosis(text)
+        counters = {row["counter"]: row for row in data["counters"]}
+        self.assertEqual(counters["offload failed"]["severity"], "warning")
+        self.assertEqual(counters["add/remove vlan dev to ppe err"]["severity"], "critical")
+        self.assertEqual(data["assessment"]["overall"], "Kritisch")
+
+    def test_parse_hwpa_interface_minus_one_warns_only_for_productive(self):
+        section = """Netdev type avm_pid ppe_ifidx ppe_port rfs vp_dev hwpa_type mht_bmp
+lo 772 0 -1 -1 no NULL 0 0
+wan 1 10 -1 -1 no NULL 1 0
+wifi0 801 0 -1 -1 no NULL 0 0
+"""
+        rows = app.parse_hwpa_interfaces(section)
+        severities = {row["netdev"]: row["severity"] for row in rows}
+        self.assertEqual(severities["wan"], "warning")
+        self.assertEqual(severities["lo"], "neutral")
+        self.assertEqual(severities["wifi0"], "neutral")
+
+    def test_parse_portshaper_active_on_wan(self):
+        data = app.parse_ppe_diagnosis(self.SAMPLE_FULL_PPE)
+        self.assertEqual(data["portshaper"][0]["assessment"], "WAN-Portshaper aktiv")
+        self.assertTrue(any("WAN-Port" in finding["message"] for finding in data["assessment"]["findings"]))
+
+    def test_parse_mtu_1508_marks_hint(self):
+        rows = app.parse_ppe_mtu_mru("port 6 MTU 0x05e4 MRU 0x05e4")
+        self.assertEqual(rows[0]["mtu_decimal"], 1508)
+        self.assertIn("RFC4638", rows[0]["assessment"])
+
+    def test_parse_flow_control_illegal_value_is_hint(self):
+        rows = app.parse_ppe_flow_control("port 6 flow control status Illegal value")
+        self.assertEqual(rows[0]["assessment"], "Hinweis: Illegal value")
