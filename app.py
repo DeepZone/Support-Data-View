@@ -4432,6 +4432,17 @@ def _analyze_ppe_diagnosis(data: dict) -> dict:
     if not data["ppe_detected"]:
         findings.append({"severity": "info", "message": "Keine PPE/HWPA-Daten in den Supportdaten gefunden."})
 
+    for message in data.get("network_correlation", {}).get("diagnostics", []):
+        severity_hint = "warning" if "nicht in PPE registriert" in message and any(
+            not row.get("ppe_registered") and row.get("networking_found") and (
+                str(row.get("network_state", "")).upper() == "UP"
+                or row.get("network_addresses")
+                or row.get("detected_service") != "Unknown"
+            )
+            for row in data.get("ppeNetworkCorrelation", [])
+        ) else "info"
+        findings.append({"severity": severity_hint, "message": message})
+
     for finding in findings:
         if _severity_rank(finding["severity"]) > _severity_rank(severity):
             severity = finding["severity"]
@@ -4445,32 +4456,374 @@ def _build_ppe_developer_summary(data: dict) -> str:
     active_bits = [name.upper() for name in ["ipv4", "ipv6", "ratelimiter"] if state.get(name) == "enabled"]
     if not data["ppe_detected"]:
         return "PPE/HWPA wurde in den Supportdaten nicht eindeutig erkannt. PPE-spezifische Blöcke oder qca_nss_ppe Module fehlen."
-    device_parts = []
-    counts = data["counts"]
-    if counts["physical_ports"]:
-        device_parts.append("physische Ports")
-    if counts["bridge_devices"]:
-        device_parts.append("Bridge Devices")
-    if counts["vlan_devices"]:
-        device_parts.append("VLAN Devices")
-    if counts["pppoe_devices"]:
-        device_parts.append("PPPoE Devices")
+    correlation_rows = data.get("ppeNetworkCorrelation", [])
+    wan_vlans = [row for row in correlation_rows if row.get("vlan_id") is not None and (str(row.get("parent_interface", "")).lower().startswith("wan") or row.get("interface_name", "").lower().startswith("wan"))]
+    confirmed = [row for row in correlation_rows if row.get("ppe_registered") and row.get("networking_found")]
+    service_sentences = []
+    for row in correlation_rows:
+        if row.get("detected_service") == "Unknown":
+            continue
+        reason = ""
+        evidence_text = " ".join(row.get("evidence", []))
+        if "PPPoE-Interface" in evidence_text:
+            reason = " über ein PPPoE-Interface"
+        elif re.search(r"\b(default|route)\b", evidence_text, re.IGNORECASE):
+            reason = " über Routing-Hinweise"
+        elif re.search(r"\b(igmp|multicast|iptv)\b", evidence_text, re.IGNORECASE):
+            reason = " über Multicast-/IGMP-Hinweise"
+        service_sentences.append(f"{row['interface_name']} wird{reason} dem Dienst {row['detected_service']} zugeordnet (Confidence {row['confidence']}).")
+    unknown_rows = [row for row in correlation_rows if row.get("detected_service") == "Unknown"]
     session_text = "Aktive Hardware Sessions sind vorhanden." if data["sessions"].get("total") else "Aktive Hardware Sessions wurden nicht gefunden."
+    error_text = "Keine PPE-Registrierungsfehler erkannt."
     if assessment["severity"] in {"warning", "critical"}:
         relevant = ", ".join(f["message"] for f in assessment["findings"] if f["severity"] in {"warning", "critical"})
-        return (
-            "PPE/HWPA ist aktiv, jedoch wurden Offload- oder Registrierungsauffälligkeiten erkannt. "
-            f"Aktive Accelerator: {', '.join(active_bits) if active_bits else 'k.A.'}. "
-            f"Bitte Counter und Device-Zuordnung prüfen: {relevant}. "
-            "Die registrierten Devices und die WAN-Kette sollten gegen die erwartete Providerkonfiguration geprüft werden."
-        )
-    return (
-        "PPE/HWPA ist aktiv. Registrierte Interfaces wurden gefunden. "
-        f"Sichtbar sind {', '.join(device_parts) if device_parts else 'keine klassifizierten Device-Rollen'}. "
-        "Es wurden keine relevanten Offload- oder Registrierungsfehler gezählt. "
-        f"{session_text} Aus PPE-Sicht kein offensichtlicher Registrierungsfehler erkennbar."
-    )
+        error_text = f"Offload- oder Registrierungsauffälligkeiten: {relevant}."
+    parts = [
+        "PPE/HWPA ist aktiv.",
+        f"Aktive Accelerator: {', '.join(active_bits) if active_bits else 'k.A.'}.",
+    ]
+    if wan_vlans:
+        parts.append(f"In der PPE/Networking-Korrelation wurden folgende WAN-VLANs erkannt: {', '.join(row['interface_name'] for row in wan_vlans)}.")
+    if confirmed:
+        parts.append(f"Die Networking-Sektion bestätigt {len(confirmed)} VLAN-Interface(s), die auch in der PPE sichtbar sind.")
+    if service_sentences:
+        parts.extend(service_sentences[:5])
+    if unknown_rows:
+        parts.append(f"{', '.join(row['interface_name'] for row in unknown_rows[:5])} konnte keinem Dienst eindeutig zugeordnet werden.")
+    parts.extend([error_text, session_text])
+    return " ".join(parts)
 
+
+
+def _extract_named_sections(text: str, keywords: List[str]) -> Dict[str, str]:
+    sections: Dict[str, str] = {}
+    pattern = re.compile(r"^##### BEGIN SECTION\s+(.+?)$", re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    for idx, match in enumerate(matches):
+        title = match.group(1).strip()
+        lower_title = title.lower()
+        if not any(keyword.lower() in lower_title for keyword in keywords):
+            continue
+        end_marker = text.find("##### END SECTION", match.end())
+        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        end = end_marker if end_marker != -1 else next_start
+        sections[title] = text[match.start():end]
+    return sections
+
+
+def _extract_networking_raw_blocks(text: str) -> Dict[str, str]:
+    blocks = _extract_named_sections(text, ["network", "routing", "route", "provider", "dsld", "multid", "tr069", "cwmp", "voip", "igmp"])
+    networking = "\n".join(raw for title, raw in blocks.items() if "network" in title.lower())
+    if not networking:
+        networking = _extract_section_containing(text, "Networking\n----------")
+    if networking and not any("network" in title.lower() for title in blocks):
+        blocks.setdefault("Networking", networking)
+    return blocks
+
+
+def _detect_vlan_from_name(name: str) -> Tuple[Optional[int], Optional[str]]:
+    clean = name.strip().strip(":")
+    match = re.match(r"^(?P<parent>.+?)\.v(?P<vlan>\d+)(?:\.|$)", clean, re.IGNORECASE)
+    if match:
+        return int(match.group("vlan")), match.group("parent")
+    match = re.match(r"^(?P<parent>(?:eth|ptm|dsl|wan|net_upstream|pon)\d*)\.(?P<vlan>\d+)(?:\.|$)", clean, re.IGNORECASE)
+    if match:
+        return int(match.group("vlan")), match.group("parent")
+    match = re.match(r"^vlan(?P<vlan>\d+)$", clean, re.IGNORECASE)
+    if match:
+        return int(match.group("vlan")), None
+    return None, _infer_base_from_name(clean)
+
+
+def _network_interface_type(name: str) -> str:
+    lower = name.lower()
+    vlan_id, _ = _detect_vlan_from_name(name)
+    if vlan_id is not None:
+        return "VLAN"
+    if re.search(r"\.p\d+$", lower) or "pppoe" in lower:
+        return "PPPoE"
+    if lower.startswith("br") or lower in {"lan", "guest"}:
+        return "BRIDGE"
+    if lower.startswith(("eth", "ptm", "dsl", "wan", "pon", "net_upstream")):
+        return "PHYSICAL"
+    return "UNKNOWN"
+
+
+def _get_or_create_network_interface(interfaces: Dict[str, dict], name: str) -> dict:
+    vlan_id, parent = _detect_vlan_from_name(name)
+    iface = interfaces.setdefault(
+        name,
+        {
+            "name": name,
+            "type": _network_interface_type(name),
+            "state": "",
+            "mac": "",
+            "mtu": None,
+            "parent": parent,
+            "vlan_id": vlan_id,
+            "ip_addresses": [],
+            "ipv6_addresses": [],
+            "bridge": "",
+            "master": "",
+            "routes": [],
+            "services": [],
+            "raw_evidence": [],
+        },
+    )
+    if vlan_id is not None:
+        iface["vlan_id"] = vlan_id
+        iface["type"] = "VLAN"
+    if parent and not iface.get("parent"):
+        iface["parent"] = parent
+    return iface
+
+
+def _append_unique(row: dict, key: str, value: str) -> None:
+    if value and value not in row.setdefault(key, []):
+        row[key].append(value)
+
+
+def _add_network_evidence(iface: dict, section: str, line: str) -> None:
+    evidence = f"{section}: {line.strip()}"
+    _append_unique(iface, "raw_evidence", evidence[:500])
+
+
+def parse_network_interfaces_from_supportdata(text: str) -> Tuple[List[dict], Dict[str, str]]:
+    raw_blocks = _extract_networking_raw_blocks(text)
+    interfaces: Dict[str, dict] = {}
+    iface_pattern = r"[A-Za-z][A-Za-z0-9_-]*(?:\.(?:v)?\d+)?(?:\.p\d+)?"
+    for section, raw in raw_blocks.items():
+        current: Optional[dict] = None
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            ip_link = re.match(rf"^\d+:\s+(?P<name>{iface_pattern})(?:@(?P<parent>{iface_pattern}))?:\s+<(?P<flags>[^>]*)>.*?\bmtu\s+(?P<mtu>\d+).*?(?:\bstate\s+(?P<state>\S+))?", stripped)
+            if ip_link:
+                name = ip_link.group("name")
+                current = _get_or_create_network_interface(interfaces, name)
+                if ip_link.group("parent"):
+                    current["parent"] = ip_link.group("parent")
+                current["mtu"] = _parse_ppe_int(ip_link.group("mtu"))
+                flags = ip_link.group("flags") or ""
+                current["state"] = ip_link.group("state") or ("UP" if "UP" in flags.split(",") else current.get("state", ""))
+                master = re.search(r"\bmaster\s+(\S+)", stripped)
+                if master:
+                    current["master"] = master.group(1)
+                _add_network_evidence(current, section, stripped)
+                continue
+            ifconfig = re.match(rf"^(?P<name>{iface_pattern})\s+(?:Link encap|flags=|HWaddr|mtu\s+)", stripped, re.IGNORECASE)
+            if ifconfig:
+                current = _get_or_create_network_interface(interfaces, ifconfig.group("name"))
+                mac = re.search(r"(?:HWaddr|ether)\s+([0-9a-f:]{17})", stripped, re.IGNORECASE)
+                if mac:
+                    current["mac"] = mac.group(1)
+                mtu = re.search(r"\bMTU[:=]?(\d+)|\bmtu\s+(\d+)", stripped, re.IGNORECASE)
+                if mtu:
+                    current["mtu"] = _parse_ppe_int(mtu.group(1) or mtu.group(2))
+                if "UP" in stripped:
+                    current["state"] = "UP"
+                _add_network_evidence(current, section, stripped)
+                continue
+            if current:
+                mac = re.search(r"(?:link/ether|HWaddr|ether)\s+([0-9a-f:]{17})", stripped, re.IGNORECASE)
+                if mac:
+                    current["mac"] = mac.group(1)
+                    _add_network_evidence(current, section, stripped)
+                mtu = re.search(r"\bMTU[:=]?(\d+)|\bmtu\s+(\d+)", stripped, re.IGNORECASE)
+                if mtu:
+                    current["mtu"] = _parse_ppe_int(mtu.group(1) or mtu.group(2))
+                    _add_network_evidence(current, section, stripped)
+                ipv4 = re.search(r"\binet(?: addr:|\s+)(\d+\.\d+\.\d+\.\d+(?:/\d+)?)", stripped)
+                if ipv4:
+                    _append_unique(current, "ip_addresses", ipv4.group(1))
+                    _add_network_evidence(current, section, stripped)
+                ipv6 = re.search(r"\binet6(?: addr:|\s+)([0-9a-f:]+(?:/\d+)?)", stripped, re.IGNORECASE)
+                if ipv6:
+                    _append_unique(current, "ipv6_addresses", ipv6.group(1))
+                    _add_network_evidence(current, section, stripped)
+            route_match = re.search(rf"\b(?:default|0\.0\.0\.0/0|route\s+\S+).*\b(?:dev|iface|interface|über|via)\s+(?P<name>{iface_pattern})\b", stripped, re.IGNORECASE)
+            if route_match:
+                iface = _get_or_create_network_interface(interfaces, route_match.group("name"))
+                _append_unique(iface, "routes", stripped)
+                _add_network_evidence(iface, section, stripped)
+            bridge_match = re.search(rf"\b(?P<br>br\S*|lan|guest)\b.*\b(?P<name>{iface_pattern})\b|\b(?P<name2>{iface_pattern})\b.*\b(?:master|bridge)\s+(?P<br2>br\S*|lan|guest)\b", stripped, re.IGNORECASE)
+            if bridge_match:
+                name = bridge_match.group("name") or bridge_match.group("name2")
+                bridge = bridge_match.group("br") or bridge_match.group("br2")
+                if name and bridge and name != bridge:
+                    iface = _get_or_create_network_interface(interfaces, name)
+                    iface["bridge"] = bridge
+                    iface["master"] = iface.get("master") or bridge
+                    _add_network_evidence(iface, section, stripped)
+            for name in set(re.findall(rf"\b{iface_pattern}\b", stripped)):
+                vlan_id, _ = _detect_vlan_from_name(name)
+                if vlan_id is None and not re.search(r"\.p\d+$", name):
+                    continue
+                iface = _get_or_create_network_interface(interfaces, name)
+                service = _detect_service_from_text(stripped)
+                if service != "Unknown":
+                    _append_unique(iface, "services", service)
+                _add_network_evidence(iface, section, stripped)
+    return sorted(interfaces.values(), key=lambda row: row["name"]), raw_blocks
+
+
+def _detect_service_from_text(text: str) -> str:
+    lower = text.lower()
+    if "igmp" in lower or "iptv" in lower or "tvswitching" in lower or re.search(r"\bmulticast\b.*\b(route|routing|proxy|snoop|group)", lower):
+        return "IPTV"
+    if any(term in lower for term in ["tr069", "tr-069", "cwmp", "acs", "provisioning", "management"]):
+        return "TR-069"
+    if any(term in lower for term in ["voip", "voice", "sip", "rtp", "telefonie", "phone", "packetcable"]):
+        return "VoIP"
+    if any(term in lower for term in ["pppoe", "default route", "default", "internet", " wan", "dhcp"]):
+        return "Internet"
+    return "Unknown"
+
+
+def _service_evidence_key(service: str) -> str:
+    return {
+        "Internet": "service_reference_evidence",
+        "IPTV": "multicast_evidence",
+        "TR-069": "service_reference_evidence",
+        "VoIP": "service_reference_evidence",
+        "Management": "service_reference_evidence",
+    }.get(service, "service_reference_evidence")
+
+
+def _merge_ppe_vlan_rows(data: dict) -> Dict[str, dict]:
+    rows: Dict[str, dict] = {}
+    for row in data.get("ppe_devices", []):
+        if row.get("category") not in {"VLAN", "PPPoE"}:
+            continue
+        name = row.get("interface_name")
+        if name:
+            rows[name] = row
+    for row in data.get("device_only", []):
+        if row.get("category") not in {"VLAN", "PPPoE"}:
+            continue
+        name = row.get("name")
+        if name and name not in rows:
+            rows[name] = {
+                "interface_name": name,
+                "ppe_index": row.get("ppe_port"),
+                "port": row.get("ppe_port"),
+                "device_type": row.get("type"),
+                "base_device": row.get("base_device"),
+                "category": row.get("category"),
+            }
+    return rows
+
+
+def build_ppe_network_correlation(data: dict, text: str) -> dict:
+    network_interfaces, networking_blocks = parse_network_interfaces_from_supportdata(text)
+    net_by_name = {row["name"]: row for row in network_interfaces}
+    ppe_by_name = _merge_ppe_vlan_rows(data)
+    pppoe_parents = {re.sub(r"\.p\d+$", "", name): name for name, row in ppe_by_name.items() if row.get("category") == "PPPoE" or re.search(r"\.p\d+$", name)}
+    vlan_names = set()
+    for name, row in ppe_by_name.items():
+        if row.get("category") == "VLAN" or _detect_vlan_from_name(name)[0] is not None:
+            vlan_names.add(name)
+    for name, row in net_by_name.items():
+        if row.get("type") == "VLAN" or row.get("vlan_id") is not None:
+            vlan_names.add(name)
+    correlations: List[dict] = []
+    mappings: List[dict] = []
+    diagnostics: List[str] = []
+    for name in sorted(vlan_names):
+        ppe = ppe_by_name.get(name)
+        net = net_by_name.get(name)
+        vlan_id, parent = _detect_vlan_from_name(name)
+        evidence: List[str] = []
+        service = "Unknown"
+        service_hits: List[str] = []
+        if ppe:
+            evidence.append(f"PPE: {name} als {ppe.get('category') or ppe.get('device_type')} registriert")
+            parent = parent or ppe.get("base_device") or ppe.get("parent")
+        if net:
+            diagnostics.append("VLAN ist in PPE und Networking vorhanden." if ppe else "VLAN ist in Networking vorhanden, aber nicht in PPE registriert.")
+            evidence.extend(net.get("raw_evidence", [])[:6])
+            parent = parent or net.get("parent")
+            service_hits.extend(net.get("services", []))
+            if net.get("routes") and any(route.lower().startswith(("default", "0.0.0.0/0")) or " default" in route.lower() for route in net.get("routes", [])):
+                service_hits.append("Internet")
+                diagnostics.append("Internet-VLAN erkannt über Default Route.")
+            for raw in net.get("raw_evidence", []):
+                detected = _detect_service_from_text(raw)
+                if detected != "Unknown":
+                    service_hits.append(detected)
+        else:
+            diagnostics.append("VLAN ist in PPE registriert, aber in Networking nicht eindeutig gefunden.")
+        if name in pppoe_parents:
+            service_hits.append("Internet")
+            evidence.append(f"PPE: PPPoE-Interface {pppoe_parents[name]} hängt auf {name}")
+            diagnostics.append("Internet-VLAN erkannt über PPPoE-Interface.")
+        if service_hits:
+            priority = ["Internet", "IPTV", "TR-069", "VoIP", "Management"]
+            service = sorted(set(service_hits), key=lambda item: priority.index(item) if item in priority else 99)[0]
+        if service == "Unknown" and (ppe or net):
+            evidence.append("WAN-VLAN erkannt, aber keine eindeutige Dienstzuordnung möglich.")
+        if service == "IPTV":
+            diagnostics.append("IPTV-Kandidat erkannt über Multicast-/IGMP-Hinweise.")
+        if service == "TR-069":
+            diagnostics.append("TR-069-Kandidat erkannt über ACS/CWMP-Hinweise.")
+        if service == "VoIP":
+            diagnostics.append("VoIP-Kandidat erkannt über SIP/RTP/Telefonie-Hinweise.")
+        if ppe and net and service != "Unknown" and (name in pppoe_parents or len(set(service_hits)) >= 1):
+            confidence = "high"
+        elif ppe and net:
+            confidence = "medium" if service != "Unknown" else "low"
+        elif service != "Unknown":
+            confidence = "low"
+        else:
+            confidence = "unknown"
+        correlation = {
+            "interface_name": name,
+            "ppe_ifidx": ppe.get("ppe_index") if ppe else None,
+            "ppe_type": ppe.get("device_type") or ppe.get("category") if ppe else "",
+            "ppe_port": ppe.get("port") if ppe else None,
+            "vlan_id": vlan_id or (net.get("vlan_id") if net else None),
+            "parent_interface": parent or (net.get("parent") if net else ""),
+            "network_state": net.get("state", "") if net else "nicht gefunden",
+            "network_mtu": net.get("mtu") if net else None,
+            "network_addresses": (net.get("ip_addresses", []) + net.get("ipv6_addresses", [])) if net else [],
+            "bridge_membership": (net.get("bridge") or net.get("master", "")) if net else "",
+            "detected_service": service,
+            "confidence": confidence,
+            "evidence": evidence[:10],
+            "ppe_registered": bool(ppe),
+            "networking_found": bool(net),
+        }
+        correlations.append(correlation)
+        mapping = {
+            "interface": name,
+            "vlan_id": correlation["vlan_id"],
+            "service": service,
+            "confidence": confidence,
+            "ppe_status": "registriert" if ppe else "nicht registriert",
+            "networking_status": "gefunden" if net else "nicht gefunden",
+            "evidence": evidence[:10],
+            "networking_section_references": [section for section in networking_blocks if any(name in line for line in networking_blocks[section].splitlines())][:5],
+            "ip_configuration_evidence": [item for item in evidence if re.search(r"\b(ip|inet|addr|dhcp)\b", item, re.IGNORECASE)],
+            "route_evidence": [item for item in evidence if re.search(r"\b(route|default|gateway|gw)\b", item, re.IGNORECASE)],
+            "bridge_evidence": [item for item in evidence if re.search(r"\b(bridge|brctl|master|br-)\b", item, re.IGNORECASE)],
+            "multicast_evidence": [item for item in evidence if re.search(r"\b(igmp|multicast|iptv|tv)\b", item, re.IGNORECASE)],
+            "service_reference_evidence": [item for item in evidence if _detect_service_from_text(item) != "Unknown"],
+        }
+        mappings.append(mapping)
+    wan_vlans = [row for row in correlations if str(row.get("parent_interface", "")).lower().startswith("wan") or row["interface_name"].lower().startswith("wan")]
+    if len(wan_vlans) > 1:
+        diagnostics.append("Mehrere WAN-VLANs erkannt. Bitte gegen Providerprofil prüfen.")
+    productive_missing_ppe = [row for row in correlations if not row["ppe_registered"] and row["networking_found"] and (row["network_state"].upper() == "UP" or row["network_addresses"] or row["detected_service"] != "Unknown")]
+    for row in productive_missing_ppe:
+        row["evidence"].append("VLAN ist im Netzwerkstack produktiv sichtbar, aber nicht in der PPE registriert.")
+    return {
+        "networkInterfaces": network_interfaces,
+        "ppeNetworkCorrelation": correlations,
+        "vlanServiceMapping": mappings,
+        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "raw_blocks": networking_blocks,
+    }
 
 def parse_ppe_diagnosis(text: str) -> dict:
     raw_blocks = _extract_ppe_raw_blocks(text)
@@ -4515,6 +4868,10 @@ def parse_ppe_diagnosis(text: str) -> dict:
         "modules": modules,
         "raw_blocks": {key: value for key, value in raw_blocks.items() if value},
     }
+    data["network_correlation"] = build_ppe_network_correlation(data, text)
+    data["networkInterfaces"] = data["network_correlation"]["networkInterfaces"]
+    data["ppeNetworkCorrelation"] = data["network_correlation"]["ppeNetworkCorrelation"]
+    data["vlanServiceMapping"] = data["network_correlation"]["vlanServiceMapping"]
     data["assessment"] = _analyze_ppe_diagnosis(data)
     data["developer_summary"] = _build_ppe_developer_summary(data)
     return data
@@ -4529,6 +4886,68 @@ def _ppe_dataframe(rows: List[dict], columns: Dict[str, str]) -> pd.DataFrame:
 def _render_missing_ppe_section(name: str) -> None:
     st.info(f"{name}: Nicht in den Supportdaten gefunden.")
 
+
+
+def _format_ppe_evidence(values: List[str]) -> str:
+    return "\n".join(values[:6]) if values else "k.A."
+
+
+def _render_ppe_network_correlation(data: dict) -> None:
+    st.markdown("### PPE ↔ Networking Korrelation")
+    rows = data.get("ppeNetworkCorrelation", [])
+    if not rows:
+        _render_missing_ppe_section("PPE ↔ Networking Korrelation")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Interface": row.get("interface_name", ""),
+                    "VLAN-ID": row.get("vlan_id", ""),
+                    "PPE registriert": "Ja" if row.get("ppe_registered") else "Nein",
+                    "Networking gefunden": "Ja" if row.get("networking_found") else "Nein",
+                    "State": row.get("network_state", ""),
+                    "MTU": row.get("network_mtu", ""),
+                    "IP-Adressen": ", ".join(row.get("network_addresses", [])),
+                    "Parent/Base": row.get("parent_interface", ""),
+                    "Bridge/Master": row.get("bridge_membership", ""),
+                    "Erkannter Dienst": row.get("detected_service", "Unknown"),
+                    "Confidence": row.get("confidence", "unknown"),
+                    "Evidence": _format_ppe_evidence(row.get("evidence", [])),
+                }
+                for row in rows
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("### VLAN-Zuordnung nach Dienst")
+    mappings = data.get("vlanServiceMapping", [])
+    for service in ["Internet", "IPTV", "TR-069", "VoIP", "Management", "Unknown"]:
+        service_rows = [row for row in mappings if row.get("service") == service]
+        with st.expander(f"{service} ({len(service_rows)})", expanded=bool(service_rows and service != "Unknown")):
+            if not service_rows:
+                st.info(f"Keine VLANs für {service} erkannt.")
+                continue
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Interface": row.get("interface", ""),
+                            "VLAN-ID": row.get("vlan_id", ""),
+                            "PPE-Status": row.get("ppe_status", ""),
+                            "Networking-Status": row.get("networking_status", ""),
+                            "Confidence": row.get("confidence", ""),
+                            "Evidence": _format_ppe_evidence(row.get("evidence", [])),
+                            "Networking-Sektionen": ", ".join(row.get("networking_section_references", [])),
+                        }
+                        for row in service_rows
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 def render_ppe_diagnosis(data: dict) -> None:
     st.subheader("PPE Diagnose / Packet Processing Engine")
@@ -4562,6 +4981,8 @@ def render_ppe_diagnosis(data: dict) -> None:
                 st.warning(message)
             else:
                 st.info(message)
+
+    _render_ppe_network_correlation(data)
 
     st.markdown("### Filter")
     f1, f2, f3, f4 = st.columns(4)
@@ -4693,12 +5114,15 @@ def render_ppe_diagnosis(data: dict) -> None:
     )
 
     with st.expander("Aufklappbare Rohdatenblöcke"):
-        if data["raw_blocks"]:
-            for name, raw in data["raw_blocks"].items():
+        combined_raw_blocks = dict(data.get("raw_blocks", {}))
+        for name, raw in data.get("network_correlation", {}).get("raw_blocks", {}).items():
+            combined_raw_blocks.setdefault(name, raw)
+        if combined_raw_blocks:
+            for name, raw in combined_raw_blocks.items():
                 st.markdown(f"**{name}**")
                 st.code(raw[:20000], language="text")
         else:
-            st.info("Keine PPE-Rohdatenblöcke gefunden.")
+            st.info("Keine PPE-/Networking-Rohdatenblöcke gefunden.")
 
 
 def _anonymize_ip(value: str) -> str:

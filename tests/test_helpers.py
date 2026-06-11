@@ -490,3 +490,55 @@ wifi0 801 0 -1 -1 no NULL 0 0
     def test_parse_flow_control_illegal_value_is_hint(self):
         rows = app.parse_ppe_flow_control("port 6 flow control status Illegal value")
         self.assertEqual(rows[0]["assessment"], "Hinweis: Illegal value")
+
+class PpeNetworkingCorrelationTests(unittest.TestCase):
+    def test_ppe_networking_correlates_pppoe_vlan_with_internet(self):
+        text = """##### BEGIN SECTION ppe_if_map
+Interface.1.iface_number = 1
+Interface.1.netdev_name = wan
+Interface.1.iface_type = physical
+Interface.1.port_number = 5
+Interface.2.iface_number = 2
+Interface.2.netdev_name = wan.v882
+Interface.2.iface_type = vlan
+Interface.2.parent_iface_number = 1
+Interface.2.port_number = 5
+Interface.3.iface_number = 3
+Interface.3.netdev_name = wan.v882.p1
+Interface.3.iface_type = pppoe
+Interface.3.parent_iface_number = 2
+Interface.3.port_number = 5
+##### END SECTION ppe_if_map
+##### BEGIN SECTION Networking Supportdata networking
+Networking
+----------
+2: wan.v882@wan: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1492 qdisc noop state UP master wanbr
+    link/ether 00:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff
+    inet 198.51.100.2/32 scope global wan.v882
+    default via 198.51.100.1 dev wan.v882
+pppoe: wan.v882.p1 uses lower interface wan.v882 for internet
+##### END SECTION Networking Supportdata networking
+"""
+        data = app.parse_ppe_diagnosis(text)
+        correlation = {row["interface_name"]: row for row in data["ppeNetworkCorrelation"]}
+        self.assertIn("wan.v882", correlation)
+        self.assertTrue(correlation["wan.v882"]["ppe_registered"])
+        self.assertTrue(correlation["wan.v882"]["networking_found"])
+        self.assertEqual(correlation["wan.v882"]["detected_service"], "Internet")
+        self.assertEqual(correlation["wan.v882"]["confidence"], "high")
+        self.assertIn("Internet-VLAN erkannt über PPPoE-Interface.", data["network_correlation"]["diagnostics"])
+
+    def test_networking_vlan_without_ppe_stays_unknown_without_service_evidence(self):
+        text = """##### BEGIN SECTION Networking Supportdata networking
+Networking
+----------
+7: eth0.7@eth0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN
+##### END SECTION Networking Supportdata networking
+"""
+        data = app.parse_ppe_diagnosis(text)
+        row = data["ppeNetworkCorrelation"][0]
+        self.assertEqual(row["interface_name"], "eth0.7")
+        self.assertFalse(row["ppe_registered"])
+        self.assertTrue(row["networking_found"])
+        self.assertEqual(row["detected_service"], "Unknown")
+        self.assertEqual(row["confidence"], "unknown")
