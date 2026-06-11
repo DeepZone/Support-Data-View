@@ -5050,7 +5050,6 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
     }
     correlations: List[dict] = []
     mappings: List[dict] = []
-    diagnostics: List[str] = []
     for name in sorted(vlan_names):
         ppe = ppe_by_name.get(name)
         net = net_by_name.get(name)
@@ -5068,39 +5067,27 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
             service_hits.append(service_vlan.get("detected_service", "Unknown"))
             evidence.extend(service_vlan.get("evidence", [])[:6])
             parent = parent or service_vlan.get("physical_parent_interface") or service_vlan.get("logical_parent_interface")
-            diagnostics.append(f"{service_vlan.get('detected_service')} VLAN {service_vlan.get('vlan_id')} primär aus Networking erkannt.")
         if ppe:
             evidence.append(f"PPE: {name} als {ppe.get('category') or ppe.get('device_type')} registriert")
             parent = parent or ppe.get("base_device") or ppe.get("parent")
         if net:
-            diagnostics.append("VLAN ist in PPE und Networking vorhanden." if ppe else "VLAN ist in Networking vorhanden, aber nicht in PPE registriert.")
             evidence.extend(net.get("raw_evidence", [])[:6])
             parent = parent or net.get("parent")
             service_hits.extend(net.get("services", []))
             if net.get("routes") and any(route.lower().startswith(("default", "0.0.0.0/0")) or " default" in route.lower() for route in net.get("routes", [])):
                 service_hits.append("Internet")
-                diagnostics.append("Internet-VLAN erkannt über Default Route.")
             for raw in net.get("raw_evidence", []):
                 detected = _detect_service_from_text(raw)
                 if detected != "Unknown":
                     service_hits.append(detected)
-        else:
-            diagnostics.append("VLAN ist in PPE registriert, aber in Networking nicht eindeutig gefunden.")
         if name in pppoe_parents:
             service_hits.append("Internet")
             evidence.append(f"PPE: PPPoE-Interface {pppoe_parents[name]} hängt auf {name}")
-            diagnostics.append("Internet-VLAN erkannt über PPPoE-Interface.")
         if service_hits:
             priority = ["Internet", "IPTV", "TR-069", "VoIP", "Management"]
             service = sorted(set(service_hits), key=lambda item: priority.index(item) if item in priority else 99)[0]
         if service == "Unknown" and (ppe or net):
             evidence.append("WAN-VLAN erkannt, aber keine eindeutige Dienstzuordnung möglich.")
-        if service == "IPTV":
-            diagnostics.append("IPTV-Kandidat erkannt über Multicast-/IGMP-Hinweise.")
-        if service == "TR-069":
-            diagnostics.append("TR-069-Kandidat erkannt über ACS/CWMP-Hinweise.")
-        if service == "VoIP":
-            diagnostics.append("VoIP-Kandidat erkannt über SIP/RTP/Telefonie-Hinweise.")
         if service_vlan and service != "Unknown":
             confidence = service_vlan.get("confidence", "high")
         elif ppe and net and service != "Unknown" and (name in pppoe_parents or len(set(service_hits)) >= 1):
@@ -5149,9 +5136,6 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
             "service_reference_evidence": [item for item in evidence if _detect_service_from_text(item) != "Unknown"],
         }
         mappings.append(mapping)
-    wan_vlans = [row for row in correlations if str(row.get("parent_interface", "")).lower().startswith("wan") or row["interface_name"].lower().startswith("wan")]
-    if len(wan_vlans) > 1:
-        diagnostics.append("Mehrere WAN-VLANs erkannt. Bitte gegen Providerprofil prüfen.")
     productive_missing_ppe = [row for row in correlations if not row["ppe_registered"] and row["networking_found"] and (row["network_state"].upper() == "UP" or row["network_addresses"] or row["detected_service"] != "Unknown")]
     for row in productive_missing_ppe:
         row["evidence"].append("VLAN ist im Netzwerkstack produktiv sichtbar, aber nicht in der PPE registriert.")
@@ -5162,7 +5146,7 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
         "unmatchedPpeVlans": service_ppe_correlation.get("unmatched_ppe_vlans", []),
         "ppeNetworkCorrelation": correlations,
         "vlanServiceMapping": mappings,
-        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "diagnostics": [],
         "raw_blocks": networking_blocks,
     }
 

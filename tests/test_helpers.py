@@ -526,7 +526,8 @@ pppoe: wan.v882.p1 uses lower interface wan.v882 for internet
         self.assertTrue(correlation["wan.v882"]["networking_found"])
         self.assertEqual(correlation["wan.v882"]["detected_service"], "Internet")
         self.assertEqual(correlation["wan.v882"]["confidence"], "high")
-        self.assertIn("Internet-VLAN erkannt über PPPoE-Interface.", data["network_correlation"]["diagnostics"])
+        self.assertIn("PPE: PPPoE-Interface wan.v882.p1 hängt auf wan.v882", correlation["wan.v882"]["evidence"])
+        self.assertNotIn("Internet-VLAN erkannt über PPPoE-Interface.", data["network_correlation"]["diagnostics"])
 
     def test_networking_vlan_without_ppe_stays_unknown_without_service_evidence(self):
         text = """##### BEGIN SECTION Networking Supportdata networking
