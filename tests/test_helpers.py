@@ -542,3 +542,129 @@ Networking
         self.assertTrue(row["networking_found"])
         self.assertEqual(row["detected_service"], "Unknown")
         self.assertEqual(row["confidence"], "unknown")
+
+
+class WanServiceVlanNetworkingTests(unittest.TestCase):
+    NETWORKING_SAMPLE = """##### BEGIN SECTION Networking Supportdata networking
+Networking
+----------
+0: name internet (attached, active internet)
+0: iface net_upstream0/wan PPPoE/26/dsl 08:b6:57:92:7f:8b stay online 1 vlan 882 prio 0 (prop: default internet)
+
+1: name voip (attached)
+1: iface net_upstream0/wan RBE/18/dsl 08:b6:57:92:7f:8c stay online 1 vlan 884 prio 6
+
+2: name iptv (attached)
+2: iface net_upstream0/wan RBE/18/dsl 08:b6:57:92:7f:8d stay online 1 vlan 883 prio 5
+
+3: name tr069 (attached)
+3: iface net_upstream0/wan RBE/18/dsl 08:b6:57:92:7f:8e stay online 1 vlan 881 prio 2
+
+wandmng_encap_update(): wand_connection(internet): iface net_upstream0 PPPoE/26 vlan 882 fixed prio 0x8100 prio 0 tos 0x00
+wandmng_encap_update(): wand_connection(voip): iface net_upstream0 RBE/18 vlan 884 fixed prio 0x8100 prio 6 tos 0x00
+wandmng_encap_update(): wand_connection(iptv): iface net_upstream0 RBE/18 vlan 883 fixed prio 0x8100 prio 5 tos 0x00
+wandmng_encap_update(): wand_connection(tr069): iface net_upstream0 RBE/18 vlan 881 fixed prio 0x8100 prio 2 tos 0x00
+
+connections of ata0
+0: name internet state attached:
+encap PPPoE (26)
+vlancfg
+encap fixed prio
+tagtype 0x8100
+id 882
+prio 0 (0x00)
+ipv4_connstatus connected
+mac 08:b6:57:92:7f:8b
+pppconfig username/passwd set
+
+1: name voip state attached:
+encap RBE (18)
+vlancfg
+id 884
+prio 6 (0x06)
+ipv4_connstatus connected
+
+2: name iptv state attached:
+encap RBE (18)
+vlancfg
+id 883
+prio 5 (0x05)
+ipv4_connstatus connected
+
+3: name tr069 state attached:
+encap RBE (18)
+vlancfg
+id 881
+prio 2 (0x02)
+ipv4_connstatus connected
+tr069_activated yes
+##### END SECTION Networking Supportdata networking
+"""
+
+    def test_networking_connection_blocks_are_primary_service_vlan_source(self):
+        rows = {row["service"]: row for row in app.parse_wan_service_vlans_from_networking(self.NETWORKING_SAMPLE)}
+
+        self.assertEqual(rows["internet"]["vlan_id"], 882)
+        self.assertEqual(rows["internet"]["encap"], "PPPoE")
+        self.assertEqual(rows["internet"]["vlan_prio"], 0)
+        self.assertEqual(rows["internet"]["physical_parent_interface"], "wan")
+        self.assertEqual(rows["internet"]["confidence"], "high")
+
+        self.assertEqual(rows["voip"]["vlan_id"], 884)
+        self.assertEqual(rows["voip"]["encap"], "RBE")
+        self.assertEqual(rows["voip"]["vlan_prio"], 6)
+        self.assertEqual(rows["voip"]["physical_parent_interface"], "wan")
+        self.assertEqual(rows["voip"]["confidence"], "high")
+
+        self.assertEqual(rows["iptv"]["vlan_id"], 883)
+        self.assertEqual(rows["iptv"]["encap"], "RBE")
+        self.assertEqual(rows["iptv"]["vlan_prio"], 5)
+        self.assertEqual(rows["iptv"]["physical_parent_interface"], "wan")
+        self.assertEqual(rows["iptv"]["confidence"], "high")
+
+        self.assertEqual(rows["tr069"]["vlan_id"], 881)
+        self.assertEqual(rows["tr069"]["encap"], "RBE")
+        self.assertEqual(rows["tr069"]["vlan_prio"], 2)
+        self.assertEqual(rows["tr069"]["physical_parent_interface"], "wan")
+        self.assertEqual(rows["tr069"]["confidence"], "high")
+
+    def test_wandmng_and_internalview_confirm_same_mapping(self):
+        rows = {row["service"]: row for row in app.parse_wan_service_vlans_from_networking(self.NETWORKING_SAMPLE)}
+        self.assertEqual(rows["internet"]["tagtype"], "0x8100")
+        self.assertEqual(rows["internet"]["tos"], "0x00")
+        self.assertEqual(rows["internet"]["ipv4_status"], "connected")
+        self.assertTrue(rows["internet"]["ppp_configured"])
+        self.assertTrue(rows["tr069"]["tr069_activated"])
+        self.assertTrue(any("wandmng_encap_update" in item for item in rows["iptv"]["evidence"]))
+        self.assertTrue(any("vlancfg id 883" in item for item in rows["iptv"]["evidence"]))
+
+    def test_partial_ppe_does_not_discard_networking_service_mapping(self):
+        text = """##### BEGIN SECTION ppe_if_map
+Interface.1.iface_number = 1
+Interface.1.netdev_name = wan
+Interface.1.iface_type = physical
+Interface.2.iface_number = 2
+Interface.2.netdev_name = wan.v882
+Interface.2.iface_type = VLAN
+Interface.2.parent_iface_number = 1
+Interface.3.iface_number = 3
+Interface.3.netdev_name = wan.v882.p1
+Interface.3.iface_type = PPPoE
+Interface.3.parent_iface_number = 2
+Interface.4.iface_number = 4
+Interface.4.netdev_name = wan.v883
+Interface.4.iface_type = VLAN
+Interface.4.parent_iface_number = 1
+##### END SECTION ppe_if_map
+""" + self.NETWORKING_SAMPLE
+        data = app.parse_ppe_diagnosis(text)
+        rows = {row["service"]: row for row in data["wanServiceVlans"]}
+        self.assertEqual(rows["voip"]["vlan_id"], 884)
+        self.assertEqual(rows["tr069"]["vlan_id"], 881)
+        self.assertEqual(rows["voip"]["confidence"], "high")
+        ppe_rows = {row["service"]: row for row in data["serviceVlanPpeCorrelation"]}
+        self.assertTrue(ppe_rows["internet"]["ppe_registered"])
+        self.assertTrue(ppe_rows["internet"]["pppoe_ppe_device_found"])
+        self.assertTrue(ppe_rows["iptv"]["ppe_registered"])
+        self.assertFalse(ppe_rows["voip"]["ppe_registered"])
+        self.assertFalse(ppe_rows["tr069"]["ppe_registered"])

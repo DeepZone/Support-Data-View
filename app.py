@@ -4668,6 +4668,314 @@ def parse_network_interfaces_from_supportdata(text: str) -> Tuple[List[dict], Di
     return sorted(interfaces.values(), key=lambda row: row["name"]), raw_blocks
 
 
+
+
+def _normalize_wan_service_name(service: str) -> str:
+    return (service or "").strip().lower()
+
+
+def _display_wan_service(service: str) -> str:
+    normalized = _normalize_wan_service_name(service)
+    return {
+        "internet": "Internet",
+        "iptv": "IPTV",
+        "tr069": "TR-069",
+        "tr-069": "TR-069",
+        "voip": "VoIP",
+        "voice": "VoIP",
+        "mgmt": "Management",
+        "management": "Management",
+    }.get(normalized, service.title() if service else "Unknown")
+
+
+def _new_wan_service_vlan(service: str, index: Optional[int] = None) -> dict:
+    normalized = _normalize_wan_service_name(service)
+    return {
+        "service": normalized,
+        "index": index,
+        "state": "",
+        "active": False,
+        "sync_group": "",
+        "logical_parent_interface": "",
+        "physical_parent_interface": "",
+        "encap": "",
+        "encap_id": None,
+        "medium": "",
+        "mac": "",
+        "vlan_id": None,
+        "vlan_prio": None,
+        "property": "",
+        "tagtype": "",
+        "tos": "",
+        "ipv4_status": "",
+        "ipv6_status": "",
+        "ipv4_address": "",
+        "ipv4_gateway": "",
+        "ipv4_mtu": None,
+        "routes": [],
+        "ppp_configured": False,
+        "tr069_activated": False,
+        "detected_service": _display_wan_service(normalized),
+        "confidence": "unknown",
+        "evidence": [],
+    }
+
+
+def _merge_wan_service_value(row: dict, key: str, value, overwrite: bool = False) -> None:
+    if value in (None, ""):
+        return
+    if overwrite or row.get(key) in (None, "", [], False):
+        row[key] = value
+
+
+def _add_wan_service_evidence(row: dict, evidence: str) -> None:
+    if evidence and evidence not in row.setdefault("evidence", []):
+        row["evidence"].append(evidence[:500])
+
+
+def _upsert_wan_service_vlan(rows: Dict[str, dict], service: str, values: dict, evidence: List[str]) -> dict:
+    normalized = _normalize_wan_service_name(service)
+    row = rows.setdefault(normalized, _new_wan_service_vlan(normalized, values.get("index")))
+    priority_fields = {"index", "service"}
+    for key, value in values.items():
+        if key in priority_fields:
+            continue
+        _merge_wan_service_value(row, key, value)
+    if values.get("index") is not None and row.get("index") is None:
+        row["index"] = values["index"]
+    row["detected_service"] = _display_wan_service(row.get("service", normalized))
+    for item in evidence:
+        _add_wan_service_evidence(row, item)
+    if row.get("vlan_id") is not None and row.get("service"):
+        row["confidence"] = "high"
+    return row
+
+
+def parse_wan_service_vlans_from_networking(text: str) -> List[dict]:
+    raw_blocks = _extract_networking_raw_blocks(text)
+    rows: Dict[str, dict] = {}
+    if not raw_blocks:
+        return []
+
+    name_re = re.compile(r"^(?P<index>\d+):\s+name\s+(?P<service>\S+)\s*\((?P<flags>[^)]*)\)", re.IGNORECASE)
+    sync_re = re.compile(r"^(?P<index>\d+):\s+sync_group:\s*(?P<sync_group>\S+)", re.IGNORECASE)
+    iface_re = re.compile(
+        r"^(?P<index>\d+):\s+iface\s+(?P<logical>[\w.-]+)(?:/(?P<physical>[\w.-]+))?\s+"
+        r"(?P<encap>[A-Za-z0-9_-]+)/(?:0x)?(?P<encap_id>\d+)(?:/(?P<medium>[\w.-]+))?\s+"
+        r"(?P<mac>[0-9a-f:]{17})\s+stay\s+online\s+(?P<online>[01])\s+vlan\s+(?P<vlan>\d+)\s+prio\s+(?P<prio>\d+)"
+        r"(?:\s+\(prop:\s*(?P<prop>[^)]*)\))?",
+        re.IGNORECASE,
+    )
+    update_re = re.compile(
+        r"wandmng_encap_update\(\):\s+wand_connection\((?P<service>[^)]+)\):\s+iface\s+(?P<iface>\S+)\s+"
+        r"(?P<encap>[A-Za-z0-9_-]+)/(?:0x)?(?P<encap_id>\d+)\s+vlan\s+(?P<vlan>\d+)\s+fixed\s+prio\s+(?P<tagtype>0x[0-9a-f]+)\s+prio\s+(?P<prio>\d+)\s+tos\s+(?P<tos>0x[0-9a-f]+)",
+        re.IGNORECASE,
+    )
+    internal_name_re = re.compile(r"^(?P<index>\d+):\s+name\s+(?P<service>\S+)\s+state\s+(?P<state>[^:]+):", re.IGNORECASE)
+
+    compact_by_index: Dict[str, dict] = {}
+    current_internal: Optional[dict] = None
+    in_vlancfg = False
+    for section, raw in raw_blocks.items():
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            name_match = name_re.match(stripped)
+            if name_match:
+                index = name_match.group("index")
+                service = name_match.group("service")
+                flags = name_match.group("flags") or ""
+                state = flags.split(",", 1)[0].strip() if flags else ""
+                values = {
+                    "index": _parse_ppe_int(index),
+                    "state": state,
+                    "active": "active" in flags.lower(),
+                }
+                compact_by_index.setdefault(index, {})["service"] = service
+                compact_by_index[index].update(values)
+                _upsert_wan_service_vlan(rows, service, values, [f"Networking: name {service} ({flags})"])
+                current_internal = None
+                in_vlancfg = False
+                continue
+
+            sync_match = sync_re.match(stripped)
+            if sync_match:
+                index = sync_match.group("index")
+                compact_by_index.setdefault(index, {})["sync_group"] = sync_match.group("sync_group")
+                service = compact_by_index[index].get("service")
+                if service:
+                    _upsert_wan_service_vlan(rows, service, {"sync_group": sync_match.group("sync_group")}, [f"Networking: sync_group {sync_match.group('sync_group')}"])
+                continue
+
+            iface_match = iface_re.match(stripped)
+            if iface_match:
+                index = iface_match.group("index")
+                service = compact_by_index.get(index, {}).get("service")
+                if not service:
+                    continue
+                values = dict(compact_by_index.get(index, {}))
+                values.update(
+                    {
+                        "index": _parse_ppe_int(index),
+                        "logical_parent_interface": iface_match.group("logical"),
+                        "physical_parent_interface": iface_match.group("physical") or "",
+                        "encap": iface_match.group("encap"),
+                        "encap_id": _parse_ppe_int(iface_match.group("encap_id")),
+                        "medium": iface_match.group("medium") or "",
+                        "mac": iface_match.group("mac"),
+                        "vlan_id": _parse_ppe_int(iface_match.group("vlan")),
+                        "vlan_prio": _parse_ppe_int(iface_match.group("prio")),
+                        "property": iface_match.group("prop") or "",
+                    }
+                )
+                evidence = f"Networking: iface {values['logical_parent_interface']}/{values['physical_parent_interface']} {values['encap']} vlan {values['vlan_id']} prio {values['vlan_prio']}"
+                _upsert_wan_service_vlan(rows, service, values, [evidence])
+                current_internal = None
+                in_vlancfg = False
+                continue
+
+            update_match = update_re.search(stripped)
+            if update_match:
+                service = update_match.group("service")
+                values = {
+                    "logical_parent_interface": update_match.group("iface"),
+                    "encap": update_match.group("encap"),
+                    "encap_id": _parse_ppe_int(update_match.group("encap_id")),
+                    "vlan_id": _parse_ppe_int(update_match.group("vlan")),
+                    "vlan_prio": _parse_ppe_int(update_match.group("prio")),
+                    "tagtype": update_match.group("tagtype"),
+                    "tos": update_match.group("tos"),
+                }
+                _upsert_wan_service_vlan(rows, service, values, [f"Networking: wandmng_encap_update {service} {values['encap']} vlan {values['vlan_id']} prio {values['vlan_prio']}"])
+                current_internal = None
+                in_vlancfg = False
+                continue
+
+            internal_match = internal_name_re.match(stripped)
+            if internal_match:
+                service = internal_match.group("service")
+                values = {"index": _parse_ppe_int(internal_match.group("index")), "state": internal_match.group("state").strip()}
+                current_internal = _upsert_wan_service_vlan(rows, service, values, [f"wand internalview: name {service} state {values['state']}"])
+                in_vlancfg = False
+                continue
+
+            if not current_internal:
+                continue
+            encap = re.match(r"^encap\s+(?P<encap>\S+)\s+\((?P<id>\d+)\)", stripped, re.IGNORECASE)
+            if encap:
+                _merge_wan_service_value(current_internal, "encap", encap.group("encap"))
+                _merge_wan_service_value(current_internal, "encap_id", _parse_ppe_int(encap.group("id")))
+                _add_wan_service_evidence(current_internal, f"wand internalview: encap {encap.group('encap')} ({encap.group('id')})")
+                continue
+            if stripped.lower() == "vlancfg":
+                in_vlancfg = True
+                continue
+            if in_vlancfg:
+                tagtype = re.match(r"^tagtype\s+(0x[0-9a-f]+)", stripped, re.IGNORECASE)
+                if tagtype:
+                    _merge_wan_service_value(current_internal, "tagtype", tagtype.group(1))
+                    continue
+                vlan_id = re.match(r"^id\s+(\d+)", stripped, re.IGNORECASE)
+                if vlan_id:
+                    current_internal["vlan_id"] = _parse_ppe_int(vlan_id.group(1))
+                    _add_wan_service_evidence(current_internal, f"wand internalview: name {current_internal.get('service')}, vlancfg id {vlan_id.group(1)}")
+                    continue
+                prio = re.match(r"^prio\s+(\d+)", stripped, re.IGNORECASE)
+                if prio:
+                    current_internal["vlan_prio"] = _parse_ppe_int(prio.group(1))
+                    continue
+            for key, pattern in {
+                "ipv4_status": r"^ipv4_connstatus\s+(\S+)",
+                "ipv6_status": r"^ipv6_connstatus\s+(\S+)",
+                "ipv4_address": r"^(?:ipv4_address|ipaddr|localip)\s+(\d+\.\d+\.\d+\.\d+)",
+                "ipv4_gateway": r"^(?:ipv4_gateway|gateway|gw)\s+(\d+\.\d+\.\d+\.\d+)",
+                "ipv4_mtu": r"^(?:ipv4_mtu|mtu)\s+(\d+)",
+                "mac": r"^mac\s+([0-9a-f:]{17})",
+            }.items():
+                found = re.match(pattern, stripped, re.IGNORECASE)
+                if found:
+                    value = _parse_ppe_int(found.group(1)) if key == "ipv4_mtu" else found.group(1)
+                    _merge_wan_service_value(current_internal, key, value)
+                    _add_wan_service_evidence(current_internal, f"wand internalview: {stripped}")
+            if re.match(r"^(?:route|default)\b", stripped, re.IGNORECASE):
+                _append_unique(current_internal, "routes", stripped)
+                _add_wan_service_evidence(current_internal, f"wand internalview: {stripped}")
+            if re.match(r"^pppconfig\s+username/passwd\s+set", stripped, re.IGNORECASE):
+                current_internal["ppp_configured"] = True
+                _add_wan_service_evidence(current_internal, "wand internalview: pppconfig username/passwd set")
+            tr069 = re.match(r"^tr069_activated\s+(yes|true|1)", stripped, re.IGNORECASE)
+            if tr069:
+                current_internal["tr069_activated"] = True
+                _add_wan_service_evidence(current_internal, "wand internalview: tr069_activated yes")
+
+    for row in rows.values():
+        if row.get("vlan_id") is not None and row.get("service"):
+            row["confidence"] = "high"
+        if row.get("encap"):
+            row["encap"] = row["encap"].upper() if row["encap"].lower() == "rbe" else row["encap"]
+    return sorted(rows.values(), key=lambda row: (row.get("index") is None, row.get("index") if row.get("index") is not None else 999, row.get("service") or ""))
+
+
+def _expected_ppe_vlan_name(service_vlan: dict) -> str:
+    parent = service_vlan.get("physical_parent_interface") or service_vlan.get("logical_parent_interface") or "wan"
+    vlan_id = service_vlan.get("vlan_id")
+    return f"{parent}.v{vlan_id}" if vlan_id is not None else parent
+
+
+def correlate_wan_service_vlans_with_ppe(service_vlans: List[dict], ppe_by_name: Dict[str, dict]) -> dict:
+    rows: List[dict] = []
+    matched_ppe_names = set()
+    for service_vlan in service_vlans:
+        expected = _expected_ppe_vlan_name(service_vlan)
+        vlan_id = service_vlan.get("vlan_id")
+        parent = service_vlan.get("physical_parent_interface") or service_vlan.get("logical_parent_interface") or ""
+        found = []
+        for name in ppe_by_name:
+            found_vlan, found_parent = _detect_vlan_from_name(name)
+            if found_vlan == vlan_id and (not parent or not found_parent or found_parent == parent or name.startswith(f"{parent}.")):
+                found.append(name)
+        pppoe_found = any(re.search(r"\.p\d+$", name) for name in found)
+        vlan_found = any(not re.search(r"\.p\d+$", name) for name in found)
+        matched_ppe_names.update(found)
+        if vlan_found:
+            assessment = "OK"
+        else:
+            assessment = "Hinweis"
+        if service_vlan.get("detected_service") == "Internet" and service_vlan.get("active") and not vlan_found:
+            assessment = "Hinweis"
+        rows.append(
+            {
+                "service": service_vlan.get("service"),
+                "detected_service": service_vlan.get("detected_service"),
+                "vlan_id": vlan_id,
+                "networking_found": True,
+                "ppe_registered": vlan_found,
+                "expected_ppe_device": expected,
+                "found_ppe_devices": sorted(found),
+                "pppoe_ppe_device_found": pppoe_found,
+                "assessment": assessment,
+                "evidence": service_vlan.get("evidence", [])[:10],
+            }
+        )
+    unmatched = []
+    for name, ppe in ppe_by_name.items():
+        if name in matched_ppe_names or ppe.get("category") != "VLAN":
+            continue
+        vlan_id, parent = _detect_vlan_from_name(name)
+        unmatched.append(
+            {
+                "interface_name": name,
+                "vlan_id": vlan_id,
+                "parent_interface": parent or ppe.get("base_device") or ppe.get("parent") or "",
+                "assessment": "Warnung",
+                "evidence": [f"PPE: {name} keinem Networking-Dienst zugeordnet"],
+            }
+        )
+    return {"service_vlan_ppe_rows": rows, "unmatched_ppe_vlans": unmatched}
+
+
 def _detect_service_from_text(text: str) -> str:
     lower = text.lower()
     if "igmp" in lower or "iptv" in lower or "tvswitching" in lower or re.search(r"\bmulticast\b.*\b(route|routing|proxy|snoop|group)", lower):
@@ -4717,8 +5025,10 @@ def _merge_ppe_vlan_rows(data: dict) -> Dict[str, dict]:
 
 def build_ppe_network_correlation(data: dict, text: str) -> dict:
     network_interfaces, networking_blocks = parse_network_interfaces_from_supportdata(text)
+    service_vlans = parse_wan_service_vlans_from_networking(text)
     net_by_name = {row["name"]: row for row in network_interfaces}
     ppe_by_name = _merge_ppe_vlan_rows(data)
+    service_ppe_correlation = correlate_wan_service_vlans_with_ppe(service_vlans, ppe_by_name)
     pppoe_parents = {re.sub(r"\.p\d+$", "", name): name for name, row in ppe_by_name.items() if row.get("category") == "PPPoE" or re.search(r"\.p\d+$", name)}
     vlan_names = set()
     for name, row in ppe_by_name.items():
@@ -4727,6 +5037,17 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
     for name, row in net_by_name.items():
         if row.get("type") == "VLAN" or row.get("vlan_id") is not None:
             vlan_names.add(name)
+    for service_vlan in service_vlans:
+        vlan_id = service_vlan.get("vlan_id")
+        if vlan_id is None:
+            continue
+        vlan_names.add(_expected_ppe_vlan_name(service_vlan))
+    service_by_expected = {_expected_ppe_vlan_name(row): row for row in service_vlans if row.get("vlan_id") is not None}
+    service_by_vlan_parent = {
+        (row.get("vlan_id"), row.get("physical_parent_interface") or row.get("logical_parent_interface") or ""): row
+        for row in service_vlans
+        if row.get("vlan_id") is not None
+    }
     correlations: List[dict] = []
     mappings: List[dict] = []
     diagnostics: List[str] = []
@@ -4737,6 +5058,17 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
         evidence: List[str] = []
         service = "Unknown"
         service_hits: List[str] = []
+        service_vlan = service_by_expected.get(name)
+        if not service_vlan and vlan_id is not None:
+            service_vlan = service_by_vlan_parent.get((vlan_id, parent or "")) or next(
+                (row for (row_vlan, _row_parent), row in service_by_vlan_parent.items() if row_vlan == vlan_id),
+                None,
+            )
+        if service_vlan:
+            service_hits.append(service_vlan.get("detected_service", "Unknown"))
+            evidence.extend(service_vlan.get("evidence", [])[:6])
+            parent = parent or service_vlan.get("physical_parent_interface") or service_vlan.get("logical_parent_interface")
+            diagnostics.append(f"{service_vlan.get('detected_service')} VLAN {service_vlan.get('vlan_id')} primär aus Networking erkannt.")
         if ppe:
             evidence.append(f"PPE: {name} als {ppe.get('category') or ppe.get('device_type')} registriert")
             parent = parent or ppe.get("base_device") or ppe.get("parent")
@@ -4769,7 +5101,9 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
             diagnostics.append("TR-069-Kandidat erkannt über ACS/CWMP-Hinweise.")
         if service == "VoIP":
             diagnostics.append("VoIP-Kandidat erkannt über SIP/RTP/Telefonie-Hinweise.")
-        if ppe and net and service != "Unknown" and (name in pppoe_parents or len(set(service_hits)) >= 1):
+        if service_vlan and service != "Unknown":
+            confidence = service_vlan.get("confidence", "high")
+        elif ppe and net and service != "Unknown" and (name in pppoe_parents or len(set(service_hits)) >= 1):
             confidence = "high"
         elif ppe and net:
             confidence = "medium" if service != "Unknown" else "low"
@@ -4792,7 +5126,11 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
             "confidence": confidence,
             "evidence": evidence[:10],
             "ppe_registered": bool(ppe),
-            "networking_found": bool(net),
+            "networking_found": bool(net or service_vlan),
+            "wan_service_vlan": service_vlan or {},
+            "expected_ppe_device": _expected_ppe_vlan_name(service_vlan) if service_vlan else name,
+            "found_ppe_devices": next((row.get("found_ppe_devices", []) for row in service_ppe_correlation["service_vlan_ppe_rows"] if row.get("expected_ppe_device") == (_expected_ppe_vlan_name(service_vlan) if service_vlan else name)), [name] if ppe else []),
+            "pppoe_ppe_device_found": name in pppoe_parents or any(found in pppoe_parents.values() for found in (next((row.get("found_ppe_devices", []) for row in service_ppe_correlation["service_vlan_ppe_rows"] if row.get("expected_ppe_device") == (_expected_ppe_vlan_name(service_vlan) if service_vlan else name)), []))),
         }
         correlations.append(correlation)
         mapping = {
@@ -4819,6 +5157,9 @@ def build_ppe_network_correlation(data: dict, text: str) -> dict:
         row["evidence"].append("VLAN ist im Netzwerkstack produktiv sichtbar, aber nicht in der PPE registriert.")
     return {
         "networkInterfaces": network_interfaces,
+        "wanServiceVlans": service_vlans,
+        "serviceVlanPpeCorrelation": service_ppe_correlation.get("service_vlan_ppe_rows", []),
+        "unmatchedPpeVlans": service_ppe_correlation.get("unmatched_ppe_vlans", []),
         "ppeNetworkCorrelation": correlations,
         "vlanServiceMapping": mappings,
         "diagnostics": list(dict.fromkeys(diagnostics)),
@@ -4870,6 +5211,9 @@ def parse_ppe_diagnosis(text: str) -> dict:
     }
     data["network_correlation"] = build_ppe_network_correlation(data, text)
     data["networkInterfaces"] = data["network_correlation"]["networkInterfaces"]
+    data["wanServiceVlans"] = data["network_correlation"].get("wanServiceVlans", [])
+    data["serviceVlanPpeCorrelation"] = data["network_correlation"].get("serviceVlanPpeCorrelation", [])
+    data["unmatchedPpeVlans"] = data["network_correlation"].get("unmatchedPpeVlans", [])
     data["ppeNetworkCorrelation"] = data["network_correlation"]["ppeNetworkCorrelation"]
     data["vlanServiceMapping"] = data["network_correlation"]["vlanServiceMapping"]
     data["assessment"] = _analyze_ppe_diagnosis(data)
@@ -4893,6 +5237,77 @@ def _format_ppe_evidence(values: List[str]) -> str:
 
 
 def _render_ppe_network_correlation(data: dict) -> None:
+    st.markdown("### Service-VLANs aus Networking")
+    service_rows = data.get("wanServiceVlans", [])
+    if service_rows:
+        ppe_rows_by_service = {row.get("service"): row for row in data.get("serviceVlanPpeCorrelation", [])}
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Dienst": row.get("detected_service", ""),
+                        "VLAN": row.get("vlan_id", ""),
+                        "Prio": row.get("vlan_prio", ""),
+                        "Encapsulation": row.get("encap", ""),
+                        "Interface": row.get("logical_parent_interface", ""),
+                        "Parent/WAN-Port": row.get("physical_parent_interface", ""),
+                        "MAC": row.get("mac", ""),
+                        "IPv4 Status": row.get("ipv4_status", ""),
+                        "IPv4 Adresse": row.get("ipv4_address", ""),
+                        "MTU": row.get("ipv4_mtu", ""),
+                        "PPE registriert": "Ja" if ppe_rows_by_service.get(row.get("service"), {}).get("ppe_registered") else "Nein",
+                        "PPPoE-PPE-Device": "Ja" if ppe_rows_by_service.get(row.get("service"), {}).get("pppoe_ppe_device_found") else "Nein",
+                        "Confidence": row.get("confidence", ""),
+                        "Evidence": _format_ppe_evidence(row.get("evidence", [])),
+                    }
+                    for row in service_rows
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Keine Service-VLANs aus der Networking-Sektion erkannt.")
+
+    st.markdown("### PPE-Abgleich")
+    service_ppe_rows = data.get("serviceVlanPpeCorrelation", [])
+    unmatched_ppe = data.get("unmatchedPpeVlans", [])
+    if service_ppe_rows or unmatched_ppe:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Dienst": row.get("detected_service", ""),
+                        "VLAN": row.get("vlan_id", ""),
+                        "Networking": "Ja" if row.get("networking_found") else "Nein",
+                        "PPE": "Ja" if row.get("ppe_registered") else "Nein",
+                        "Erwartetes PPE Device": row.get("expected_ppe_device", ""),
+                        "Gefundenes PPE Device": ", ".join(row.get("found_ppe_devices", [])) or "-",
+                        "PPPoE-PPE-Device": "Ja" if row.get("pppoe_ppe_device_found") else "Nein",
+                        "Bewertung": row.get("assessment", ""),
+                    }
+                    for row in service_ppe_rows
+                ]
+                + [
+                    {
+                        "Dienst": "Unknown",
+                        "VLAN": row.get("vlan_id", ""),
+                        "Networking": "Nein",
+                        "PPE": "Ja",
+                        "Erwartetes PPE Device": "-",
+                        "Gefundenes PPE Device": row.get("interface_name", ""),
+                        "PPPoE-PPE-Device": "Nein",
+                        "Bewertung": row.get("assessment", ""),
+                    }
+                    for row in unmatched_ppe
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Kein PPE-Abgleich für Service-VLANs verfügbar.")
+
     st.markdown("### PPE ↔ Networking Korrelation")
     rows = data.get("ppeNetworkCorrelation", [])
     if not rows:
