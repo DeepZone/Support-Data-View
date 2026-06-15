@@ -44,6 +44,109 @@ class HelperFunctionTests(unittest.TestCase):
 ##### END SECTION DOCSIS cable spectrum"""
         self.assertEqual(app.parse_cable_spectrum(text), [])
 
+
+    def test_parse_docsis_channels_reads_synthetic_cable_tables(self):
+        text = """##### BEGIN SECTION DOCSIS Supportdata cable
+Operational mode: DOCSIS 3.1
+Frequency plan: Europe
+Modem status: Operational
+Single-Carrier Channels
+----------------+--------+-----------+---------+---------+-------------+-------+---------+--------+-------+------------+-----------+---------+-------+-----
+ID | Active | Frequency | SymRate | ChWidth | Attenuation | Power | Power16 | P-High | P-Low | P-DRW-High | P-DRW-Low | DeltaPF | Mod | Mux
+1 | YES | 36.800 | 5120 | 6400 | 0 | 42.5 | 0 | 0 | 0 | 0 | 0 | 0 | 64QAM | ATDMA
+2 | NO | 45.000 | 5120 | 6400 | 0 | 0.0 | 0 | 0 | 0 | 0 | 0 | 0 | none | ATDMA
+
+Single-Carrier Receivers
+----------------+--------+-----------+---------+-------+------+-----------+-------------+---------+---------+----------+--------+-------
+ID | Active | Frequency | Primary | Power | MSE | CorrWords | UncorrWords | QAMLock | FECLock | MPEGLock | Mod | Annex
+10 | YES | 618.000 | YES | -1.5 | 38.7 | 123 | 4 | YES | YES | YES | 256QAM | B
+11 | YES | 626.000 | NO | 0.0 | 0.0 | 0 | 0 | YES | YES | YES | er | B
+
+Multi-Carrier (OFDM) Receivers
+----------------+--------+-----------------+---------+----------+-------+------+-----------+-------------+---------+----------------+---------------+----------
+ID | Active | Frequency | Primary | PLC Freq | Power | MER | CorrWords | UncorrWords | Max Mod | Rolloff Period | Cyclic Prefix | FFT Size
+20 | YES | 108.975 - 256.975 | NO | 171.000 | -2.0 | 40.5 | 456 | 7 | 4096QAM | 128 | 512 | 4K
+21 | NO | 300.000 - 420.000 | NO | 330.000 | -1.0 | 39.0 | 0 | 0 | 1024QAM | 128 | 512 | 4K
+##### END SECTION DOCSIS
+##### BEGIN SECTION DOCSIS cable spectrum
+# min, max, step size, data...
+100000000, 102000000, 1000000, -300, -295, -290
+##### END SECTION DOCSIS cable spectrum"""
+        docsis = app.parse_docsis_channels(text)
+
+        self.assertEqual(docsis["operational_mode"], "DOCSIS 3.1")
+        self.assertEqual(docsis["frequency_plan"], "Europe")
+        self.assertEqual(docsis["modem_status"], "Operational")
+        self.assertEqual(
+            docsis["upstream_channels"],
+            [
+                {
+                    "ID": 1,
+                    "Aktiv": "YES",
+                    "Frequenz (MHz)": 36.8,
+                    "Power (dBmV)": 42.5,
+                    "Modulation": "64QAM",
+                }
+            ],
+        )
+        self.assertEqual(
+            docsis["downstream_channels"],
+            [
+                {
+                    "ID": 10,
+                    "Aktiv": "YES",
+                    "Frequenz (MHz)": 618.0,
+                    "Power (dBmV)": -1.5,
+                    "MSE (dB)": 38.7,
+                    "CorrWords": 123,
+                    "UncorrWords": 4,
+                    "Modulation": "256QAM",
+                }
+            ],
+        )
+        self.assertEqual(
+            docsis["ofdm_channels"],
+            [
+                {
+                    "ID": 20,
+                    "Aktiv": "YES",
+                    "Frequenz (MHz)": "108.975 - 256.975",
+                    "PLC Freq (MHz)": 171.0,
+                    "Power (dBmV)": -2.0,
+                    "MER (dB)": 40.5,
+                    "CorrWords": 456,
+                    "UncorrWords": 7,
+                    "Max Mod": "4096QAM",
+                }
+            ],
+        )
+        self.assertEqual(
+            docsis["spectrum_points"],
+            [
+                {"Frequenz (MHz)": 100.0, "Pegel (dB)": -30.0},
+                {"Frequenz (MHz)": 101.0, "Pegel (dB)": -29.5},
+                {"Frequenz (MHz)": 102.0, "Pegel (dB)": -29.0},
+            ],
+        )
+
+    def test_parse_docsis_channels_ignores_incomplete_sections(self):
+        empty_section = """##### BEGIN SECTION DOCSIS Supportdata cable
+Operational mode: DOCSIS 3.1
+Single-Carrier Channels
+ID | Active | Frequency
+1 | YES | 36.800
+##### END SECTION DOCSIS"""
+        docsis = app.parse_docsis_channels(empty_section)
+
+        self.assertEqual(docsis["operational_mode"], "DOCSIS 3.1")
+        self.assertEqual(docsis["upstream_channels"], [])
+        self.assertEqual(docsis["downstream_channels"], [])
+        self.assertEqual(docsis["ofdm_channels"], [])
+        self.assertEqual(docsis["spectrum_points"], [])
+
+    def test_parse_docsis_channels_returns_empty_without_docsis_section(self):
+        self.assertEqual(app.parse_docsis_channels("synthetic text without cable supportdata"), {})
+
     def test_parse_frequency_range_parses_values(self):
         self.assertEqual(app._parse_frequency_range("108.975 - 256.975"), (108.975, 256.975))
         self.assertEqual(app._parse_frequency_range("256.975-108.975"), (108.975, 256.975))
