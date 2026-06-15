@@ -5,6 +5,41 @@ from support_viewer import utils
 
 
 class UtilsExtractionTests(unittest.TestCase):
+    def test_extract_value_reads_expected_key_value_formats(self):
+        block = """name = internet
+use_dhcp=1
+  dslencap   =   dslencap_pppoe
+ip4_addr = 192.0.2.10
+key.with.dot = escaped key names are supported"""
+
+        self.assertEqual(utils.extract_value(block, "name"), "internet")
+        self.assertEqual(utils.extract_value(block, "use_dhcp"), "1")
+        self.assertEqual(utils.extract_value(block, "dslencap"), "dslencap_pppoe")
+        self.assertEqual(utils.extract_value(block, "ip4_addr"), "192.0.2.10")
+        self.assertEqual(utils.extract_value(block, "key.with.dot"), "escaped key names are supported")
+
+    def test_extract_value_strips_outer_whitespace_and_single_quotes(self):
+        block = """name = 'internet'
+if_name = 'wlan0'
+comment = 'value with spaces'
+double_quoted = "kept as-is\""""
+
+        self.assertEqual(utils.extract_value(block, "name"), "internet")
+        self.assertEqual(utils.extract_value(block, "if_name"), "wlan0")
+        self.assertEqual(utils.extract_value(block, "comment"), "value with spaces")
+        self.assertEqual(utils.extract_value(block, "double_quoted"), '"kept as-is"')
+
+    def test_extract_value_missing_and_empty_values_follow_existing_fallbacks(self):
+        block = """name = internet
+empty =
+blank =   
+other = value"""
+
+        self.assertIsNone(utils.extract_value(block, "missing"))
+        self.assertIsNone(utils.extract_value("empty =", "empty"))
+        self.assertEqual(utils.extract_value(block, "empty"), "blank =")
+        self.assertEqual(utils.extract_value(block, "blank"), "other = value")
+
     def test_extract_section_returns_content_between_markers(self):
         text = "before <start>\nvalue\n<end> after"
         self.assertEqual(utils.extract_section(text, "<start>", "<end>"), "\nvalue\n")
@@ -102,6 +137,13 @@ class UtilsParseTests(unittest.TestCase):
 
 
 class AppImportCompatibilityTests(unittest.TestCase):
+    def test_app_extract_value_is_utils_extract_value(self):
+        self.assertIs(app.extract_value, utils.extract_value)
+
+    def test_app_extract_value_remains_callable(self):
+        self.assertEqual(app.extract_value("name = internet", "name"), "internet")
+        self.assertIsNone(app.extract_value("name = internet", "missing"))
+
     def test_app_exports_selected_utils(self):
         self.assertIs(app.extract_section, utils.extract_section)
         self.assertIs(app.parse_int, utils.parse_int)
