@@ -1,6 +1,11 @@
 import unittest
 
 import app
+from support_viewer.parsers.dect import (
+    extract_dect_rssi_index_to_dbm,
+    parse_dect_basis_info,
+    parse_dect_device_info,
+)
 from support_viewer.parsers.events import parse_events
 from support_viewer.parsers.telephony import parse_voip_accounts
 
@@ -69,6 +74,11 @@ ua1 (22222@backup.example.test, TCP, port=5061, sipiface=voip): not registered -
 
 
 class DectParserTests(unittest.TestCase):
+    def test_app_reexports_dect_parser_functions(self):
+        self.assertIs(app.extract_dect_rssi_index_to_dbm, extract_dect_rssi_index_to_dbm)
+        self.assertIs(app.parse_dect_device_info, parse_dect_device_info)
+        self.assertIs(app.parse_dect_basis_info, parse_dect_basis_info)
+
     def test_extract_dect_rssi_index_to_dbm_uses_synthetic_mapping_and_falls_back_on_invalid_data(self):
         mapping = app.extract_dect_rssi_index_to_dbm(
             "DECT_RSSI_INDEX_TO_DBM = -90.0 -89.0 -88.0 -87.0 -86.0 -85.0 -84.0 -83.0 -82.0 -81.0"
