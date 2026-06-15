@@ -1,6 +1,7 @@
 import unittest
 
 import app
+from support_viewer.parsers.events import parse_events
 
 
 def dect_device_line(name="LabPhone", model="8.3", ber="0.25"):
@@ -123,6 +124,9 @@ ignored
 
 
 class EventParserTests(unittest.TestCase):
+    def test_app_parse_events_reexports_parser_function(self):
+        self.assertIs(app.parse_events, parse_events)
+
     def test_parse_events_extracts_multiple_date_time_message_rows_and_ignores_incomplete_rows(self):
         text = """##### BEGIN SECTION Events Events
 Events
