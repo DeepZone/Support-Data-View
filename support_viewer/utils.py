@@ -27,6 +27,13 @@ def extract_section_by_prefix(text: str, start_marker: str) -> str:
     return text[start_index:end_index]
 
 
+def extract_value(block: str, key: str) -> Optional[str]:
+    match = re.search(rf"^\s*{re.escape(key)}\s*=\s*(.+)$", block, re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip().strip("'")
+
+
 def extract_numeric_array(text: str, label: str) -> List[int]:
     match = re.search(rf"{re.escape(label)}:\s*([0-9,\-]+)", text)
     if not match:
