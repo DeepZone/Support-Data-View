@@ -42,7 +42,22 @@ from support_viewer.models import (
     WifiRadioLoad,
     WifiStation,
 )
-from support_viewer.utils import escape_html
+from support_viewer.utils import (
+    _parse_frequency_range,
+    escape_html,
+    extract_float_value,
+    extract_int_value,
+    extract_kbits_rate,
+    extract_numeric_array,
+    extract_numeric_array_loose,
+    extract_section,
+    extract_section_between,
+    extract_section_block,
+    extract_section_by_prefix,
+    parse_channel_float,
+    parse_int,
+    parse_optional_float,
+)
 
 
 ALLOWED_UPLOAD_SUFFIXES = {".txt"}
@@ -111,31 +126,6 @@ def format_radio_label(radio_id: int) -> str:
         return f"Radio {radio_id} ({band})"
     return f"Radio {radio_id}"
 
-def extract_section(text: str, start_marker: str, end_marker: str) -> str:
-    pattern = re.compile(
-        rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
-        re.DOTALL,
-    )
-    match = pattern.search(text)
-    return match.group(1) if match else ""
-
-
-def extract_section_by_prefix(text: str, start_marker: str) -> str:
-    start_index = text.find(start_marker)
-    if start_index == -1:
-        return ""
-    end_index = text.find("##### END SECTION", start_index)
-    if end_index == -1:
-        return text[start_index:]
-    return text[start_index:end_index]
-
-
-def extract_numeric_array(text: str, label: str) -> List[int]:
-    match = re.search(rf"{re.escape(label)}:\s*([0-9,\-]+)", text)
-    if not match:
-        return []
-    values = [int(value) for value in match.group(1).split(",") if value.strip()]
-    return values
 
 
 def parse_wlan_env_scan(text: str) -> List[WifiNetwork]:
@@ -716,16 +706,6 @@ def is_mesh_client_connected(node: dict, mesh_links: List[dict]) -> bool:
 
 
 
-def parse_optional_float(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    value = value.strip()
-    if not value or value == "-":
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
 
 
 def extract_dect_rssi_index_to_dbm(text: str) -> Dict[int, float]:
@@ -1336,49 +1316,6 @@ def parse_dsl_snr(text: str) -> dict:
     }
 
 
-def extract_numeric_array_loose(text: str, label: str) -> List[int]:
-    match = re.search(rf"{re.escape(label)}\s*:\s*([0-9,\-]+)", text)
-    if not match:
-        return []
-    values = [int(value) for value in match.group(1).split(",") if value.strip()]
-    return values
-
-
-def extract_int_value(text: str, label: str) -> Optional[int]:
-    match = re.search(rf"{re.escape(label)}\s*:\s*([-\d]+)", text)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def extract_float_value(text: str, label: str) -> Optional[float]:
-    match = re.search(rf"{re.escape(label)}\s*:\s*([-\d]+(?:\.\d+)?)", text)
-    if not match:
-        return None
-    return float(match.group(1))
-
-
-def extract_kbits_rate(text: str, label: str) -> Optional[int]:
-    match = re.search(rf"{re.escape(label)}\s*:\s*(\d+)\s*kBits/s", text)
-    if not match:
-        return None
-    return int(match.group(1))
-
-
-def extract_section_block(text: str, header: str) -> str:
-    match = re.search(rf"{re.escape(header)}\n[-]+\n(.*?)(\n[A-Za-z].*?:|\Z)", text, re.DOTALL)
-    if not match:
-        return ""
-    return match.group(1)
-
-
-def extract_section_between(text: str, start_marker: str, end_marker: str) -> str:
-    pattern = re.compile(
-        rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
-        re.DOTALL,
-    )
-    match = pattern.search(text)
-    return match.group(1) if match else ""
 
 
 def parse_dsl_metrics(text: str) -> dict:
@@ -1741,23 +1678,6 @@ def parse_table_rows(section: str, start_marker: str, columns: List[str]) -> Lis
     return rows
 
 
-def parse_channel_float(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    normalized = str(value).strip().replace(",", ".")
-    if not normalized:
-        return None
-    try:
-        return float(normalized)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_int(value: str) -> Optional[int]:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def is_plausible_channel(active: str, frequency: Optional[float], power: Optional[float], modulation: str) -> bool:
@@ -1958,19 +1878,6 @@ def parse_cable_spectrum(text: str) -> List[dict]:
     return points
 
 
-def _parse_frequency_range(value: Optional[str]) -> Optional[Tuple[float, float]]:
-    if value is None:
-        return None
-    match = re.match(r"\s*([\d.]+)\s*-\s*([\d.]+)\s*", str(value))
-    if not match:
-        return None
-    start = parse_channel_float(match.group(1))
-    end = parse_channel_float(match.group(2))
-    if start is None or end is None:
-        return None
-    if end < start:
-        start, end = end, start
-    return (start, end)
 
 
 def build_cable_usage_ranges(docsis_data: dict, spectrum_points: List[dict]) -> List[dict]:
