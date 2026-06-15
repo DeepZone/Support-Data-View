@@ -4233,6 +4233,7 @@ def parse_common_ppe_offload_counters(section: str) -> List[dict]:
 
 def parse_ppe_summary_and_state(section: str, caps_section: str) -> dict:
     used_match = re.search(r"used hws\s+(\d+)\s*/\s*(\d+)", section, re.IGNORECASE)
+    free_match = re.search(r"free hws\s+(\d+)\s*/\s*(\d+)", section, re.IGNORECASE)
     max_match = re.search(r"MAX HWPA PPE Sessions\s*:\s*(\d+)", caps_section, re.IGNORECASE)
     state = {"ipv4": None, "ipv6": None, "ratelimiter": None}
     state_match = re.search(r"Accelerator state:\s*(.*?)(?:\n\s*\n|\nCounter per accelerator:|\Z)", section, re.IGNORECASE | re.DOTALL)
@@ -4241,7 +4242,8 @@ def parse_ppe_summary_and_state(section: str, caps_section: str) -> dict:
             state[key.lower()] = value.lower()
     return {
         "used_hws": int(used_match.group(1)) if used_match else None,
-        "max_hws": int(used_match.group(2)) if used_match else (int(max_match.group(1)) if max_match else None),
+        "free_hws": int(free_match.group(1)) if free_match else None,
+        "max_hws": int(used_match.group(2)) if used_match else (int(free_match.group(2)) if free_match else (int(max_match.group(1)) if max_match else None)),
         "accelerator_state": state,
     }
 

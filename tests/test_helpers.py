@@ -773,6 +773,138 @@ Interface.4.parent_iface_number = 1
         self.assertFalse(ppe_rows["voip"]["ppe_registered"])
         self.assertFalse(ppe_rows["tr069"]["ppe_registered"])
 
+class PpeHwpaSyntheticCoverageTests(unittest.TestCase):
+    SERVICE_NETWORKING = """##### BEGIN SECTION Networking Supportdata networking
+Networking
+----------
+0: name internet (attached, active internet)
+0: iface net_upstream0/wan PPPoE/26/dsl 00:11:22:33:44:01 stay online 1 vlan 882 prio 0 (prop: default internet)
+1: name iptv (attached)
+1: iface net_upstream0/wan RBE/18/dsl 00:11:22:33:44:02 stay online 1 vlan 883 prio 5
+2: name voip (attached)
+2: iface net_upstream0/wan RBE/18/dsl 00:11:22:33:44:03 stay online 1 vlan 884 prio 6
+3: name tr069 (attached)
+3: iface net_upstream0/wan RBE/18/dsl 00:11:22:33:44:04 stay online 1 vlan 881 prio 2
+wandmng_encap_update(): wand_connection(internet): iface net_upstream0 PPPoE/26 vlan 882 fixed prio 0x8100 prio 0 tos 0x00
+wandmng_encap_update(): wand_connection(iptv): iface net_upstream0 RBE/18 vlan 883 fixed prio 0x8100 prio 5 tos 0x00
+wandmng_encap_update(): wand_connection(voip): iface net_upstream0 RBE/18 vlan 884 fixed prio 0x8100 prio 6 tos 0x00
+wandmng_encap_update(): wand_connection(tr069): iface net_upstream0 RBE/18 vlan 881 fixed prio 0x8100 prio 2 tos 0x00
+##### END SECTION Networking Supportdata networking
+"""
+
+    PPE_MAP = """##### BEGIN SECTION ppe_if_map
+Interface.1.iface_number = 1
+Interface.1.netdev_name = wan
+Interface.1.iface_type = PHYSICAL
+Interface.1.port_number = 6
+Interface.2.iface_number = 2
+Interface.2.netdev_name = wan.v882
+Interface.2.iface_type = VLAN
+Interface.2.parent_iface_number = 1
+Interface.2.port_number = 6
+Interface.3.iface_number = 3
+Interface.3.netdev_name = wan.v882.p1
+Interface.3.iface_type = PPPoE
+Interface.3.parent_iface_number = 2
+Interface.3.port_number = 6
+Interface.4.iface_number = 4
+Interface.4.netdev_name = wan.v883
+Interface.4.iface_type = VLAN
+Interface.4.parent_iface_number = 1
+Interface.4.port_number = 6
+Interface.5.iface_number = 5
+Interface.5.netdev_name = wan.v884
+Interface.5.iface_type = VLAN
+Interface.5.parent_iface_number = 1
+Interface.5.port_number = 6
+Interface.6.iface_number = 6
+Interface.6.netdev_name = wan.v881
+Interface.6.iface_type = VLAN
+Interface.6.parent_iface_number = 1
+Interface.6.port_number = 6
+##### END SECTION ppe_if_map
+"""
+
+    def test_summary_reads_used_free_and_max_hws(self):
+        summary = app.parse_ppe_summary_and_state("""HWPA ppe summary:
+used hws 7 / 4096
+free hws 4089 / 4096
+""", "")
+        self.assertEqual(summary["used_hws"], 7)
+        self.assertEqual(summary["free_hws"], 4089)
+        self.assertEqual(summary["max_hws"], 4096)
+
+    def test_all_documented_offload_error_counters_get_expected_severity(self):
+        text = """Common PPE offload counter:
+  no free hws: 1
+  offload failed: 2
+  dev not registered in ppe: 3
+  ppe offload collision: 11
+  add/remove vlan dev to ppe err: 4
+  add/remove pppoe dev to ppe err: 5
+Accelerator state:
+  ipv4: enabled
+"""
+        counters = {row["counter"]: row for row in app.parse_common_ppe_offload_counters(text)}
+        self.assertEqual(counters["no free hws"]["severity"], "critical")
+        self.assertEqual(counters["offload failed"]["severity"], "warning")
+        self.assertEqual(counters["dev not registered in ppe"]["severity"], "warning")
+        self.assertEqual(counters["ppe offload collision"]["severity"], "warning")
+        self.assertEqual(counters["add/remove vlan dev to ppe err"]["severity"], "critical")
+        self.assertEqual(counters["add/remove pppoe dev to ppe err"]["severity"], "critical")
+
+    def test_vlan_services_correlate_with_ppe_and_pppoe_registration(self):
+        data = app.parse_ppe_diagnosis(self.PPE_MAP + self.SERVICE_NETWORKING)
+        rows = {row["service"]: row for row in data["serviceVlanPpeCorrelation"]}
+        self.assertTrue(rows["internet"]["ppe_registered"])
+        self.assertTrue(rows["internet"]["pppoe_ppe_device_found"])
+        self.assertTrue(rows["iptv"]["ppe_registered"])
+        self.assertTrue(rows["voip"]["ppe_registered"])
+        self.assertTrue(rows["tr069"]["ppe_registered"])
+        service_interfaces = {}
+        for row in data["vlanServiceMapping"]:
+            service_interfaces.setdefault(row["service"], set()).add(row["interface"])
+        self.assertIn("wan.v882", service_interfaces["Internet"])
+        self.assertIn("wan.v882.p1", service_interfaces["Internet"])
+        self.assertEqual(service_interfaces["IPTV"], {"wan.v883"})
+        self.assertEqual(service_interfaces["VoIP"], {"wan.v884"})
+        self.assertEqual(service_interfaces["TR-069"], {"wan.v881"})
+
+    def test_empty_and_incomplete_ppe_hwpa_sections_are_safe(self):
+        text = """##### BEGIN SECTION brief
+HWPA ppe summary:
+Common PPE offload counter:
+##### END SECTION brief
+##### BEGIN SECTION interfaces
+PPE device only
+Name ppe_port Type MTU Base-Dev Refs MAC
+##### END SECTION interfaces
+##### BEGIN SECTION ppe_if_map
+Interface.9.iface_number = 9
+Interface.9.iface_type = VLAN
+##### END SECTION ppe_if_map
+"""
+        data = app.parse_ppe_diagnosis(text)
+        self.assertTrue(data["hwpa_detected"])
+        self.assertIsNone(data["summary"]["used_hws"])
+        self.assertIsNone(data["summary"]["free_hws"])
+        self.assertEqual(data["counters"], [])
+        self.assertEqual(data["counts"]["registered_devices"], 1)
+
+    def test_parse_support_data_exposes_synthetic_ppe_diagnosis(self):
+        parsed = app.parse_support_data(self.PPE_MAP + self.SERVICE_NETWORKING + """
+##### BEGIN SECTION synced_sessions
+HWPA synced sessions
+HWS: abcdef
+accelerator: ratelimiter
+source IPv4: 192.0.2.1
+destination IPv4: 198.51.100.1
+##### END SECTION synced_sessions
+""")
+        self.assertIn("ppe_diagnosis", parsed)
+        self.assertTrue(parsed["ppe_diagnosis"]["ppe_detected"])
+        self.assertEqual(parsed["ppe_diagnosis"]["sessions"]["by_type"]["ratelimiter"], 1)
+
 class SecurityHelperTests(unittest.TestCase):
     def test_escape_html_escapes_support_data_values(self):
         value = '<img src=x onerror="alert(1)"> & device'
