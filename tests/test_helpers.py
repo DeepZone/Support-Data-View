@@ -669,3 +669,27 @@ Interface.4.parent_iface_number = 1
         self.assertTrue(ppe_rows["iptv"]["ppe_registered"])
         self.assertFalse(ppe_rows["voip"]["ppe_registered"])
         self.assertFalse(ppe_rows["tr069"]["ppe_registered"])
+
+class SecurityHelperTests(unittest.TestCase):
+    def test_escape_html_escapes_support_data_values(self):
+        value = '<img src=x onerror="alert(1)"> & device'
+        self.assertEqual(app.escape_html(value), '&lt;img src=x onerror=&quot;alert(1)&quot;&gt; &amp; device')
+
+    def test_decode_support_data_upload_accepts_txt_and_ignores_invalid_utf8(self):
+        decoded = app.decode_support_data_upload('support.txt', b'hello\xffworld')
+        self.assertEqual(decoded, 'helloworld')
+
+    def test_decode_support_data_upload_rejects_unexpected_extension(self):
+        with self.assertRaises(ValueError):
+            app.decode_support_data_upload('support.html', b'<html></html>')
+
+    def test_decode_support_data_upload_rejects_oversized_content(self):
+        with self.assertRaises(ValueError):
+            app.decode_support_data_upload('support.txt', b'x' * (app.MAX_UPLOAD_SIZE_BYTES + 1))
+
+    def test_parse_support_data_tolerates_missing_sections(self):
+        parsed = app.parse_support_data('synthetic minimal support data')
+        self.assertEqual(parsed['networks'], [])
+        self.assertEqual(parsed['ports'], [])
+        self.assertIsNone(parsed['internet_connection'])
+        self.assertEqual(parsed['docsis_data'], {})

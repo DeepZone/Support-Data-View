@@ -22,3 +22,8 @@ env/
 support*.txt
 *_support*.txt
 *.dsl.html
+*.supportdata
+*.supportdata.txt
+*.export
+*.pcap
+*.pcapng
