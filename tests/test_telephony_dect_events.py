@@ -2,6 +2,7 @@ import unittest
 
 import app
 from support_viewer.parsers.events import parse_events
+from support_viewer.parsers.telephony import parse_voip_accounts
 
 
 def dect_device_line(name="LabPhone", model="8.3", ber="0.25"):
@@ -26,6 +27,9 @@ def dect_hg_line():
 
 
 class TelephonyVoipParserTests(unittest.TestCase):
+    def test_app_reexports_telephony_parse_voip_accounts(self):
+        self.assertIs(app.parse_voip_accounts, parse_voip_accounts)
+
     def test_parse_voip_accounts_extracts_registration_security_traffic_and_call_counters(self):
         text = """##### BEGIN SECTION voip Voice over IP
 ua0 (11111@sip.example.test, UDP, port=5060, sipiface=internet): registered -- reachability 100 % (OK)
