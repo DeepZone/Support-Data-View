@@ -22,3 +22,10 @@ streamlit run app.py
 ```
 
 Dann im Browser die URL öffnen, die Streamlit ausgibt (meist `http://localhost:8501`).
+
+## Datenschutz & Sicherheit
+
+- Die Anwendung verarbeitet hochsensible Supportdaten lokal im Streamlit-Prozess und speichert Uploads nicht persistent.
+- Lade nur `.txt`-Supportdaten hoch; andere Dateitypen werden abgewiesen.
+- Committe niemals echte Supportdaten, Logs oder Screenshots mit MAC-Adressen, öffentlichen IPs, SIP-/Provider- oder WLAN-Daten.
+- Für Tests und Issues ausschließlich synthetische oder konsequent anonymisierte Daten verwenden.

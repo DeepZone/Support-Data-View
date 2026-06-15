@@ -65,6 +65,10 @@ class WifiNoiseFloorEntry:
     band: str
 
 
+ALLOWED_UPLOAD_SUFFIXES = {".txt"}
+MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024
+
+
 RADIO_BAND_LABELS = {
     101: "2,4 GHz",
     102: "5 GHz",
@@ -345,6 +349,25 @@ DECT_MODEL_NAMES = {
     "12.1": "FRITZ!Fon M3",
     "213": "FRITZ!Fon MT-C (eigentlich Swisscom-Gerät)",
 }
+
+
+def escape_html(value: object) -> str:
+    """Escape support-data derived values before rendering custom HTML."""
+    return html.escape(str(value), quote=True)
+
+
+def is_allowed_support_data_filename(filename: str) -> bool:
+    return any(filename.lower().endswith(suffix) for suffix in ALLOWED_UPLOAD_SUFFIXES)
+
+
+def decode_support_data_upload(filename: str, content: bytes) -> str:
+    if not is_allowed_support_data_filename(filename):
+        allowed = ", ".join(sorted(ALLOWED_UPLOAD_SUFFIXES))
+        raise ValueError(f"Nicht unterstützter Dateityp. Erlaubt: {allowed}")
+    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+        max_mib = MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+        raise ValueError(f"Datei ist zu groß. Maximum: {max_mib} MiB")
+    return content.decode("utf-8", errors="ignore")
 
 
 def format_radio_label(radio_id: int) -> str:
@@ -3347,37 +3370,37 @@ def render_network_settings(settings: Ar7NetworkSettings) -> None:
                     <div class="network-card lan">
                         <div class="network-card-header">LAN Netzwerk</div>
                         <ul>
-                            <li>{html.escape(_network_line(lan))}</li>
-                            <li>DHCP: {html.escape(dhcp_range)}</li>
-                            <li>DNS: {html.escape(dns_line)}</li>
+                            <li>{escape_html(_network_line(lan))}</li>
+                            <li>DHCP: {escape_html(dhcp_range)}</li>
+                            <li>DNS: {escape_html(dns_line)}</li>
                         </ul>
                     </div>
                     <div class="network-card guest">
                         <div class="network-card-header">Gastnetz</div>
-                        <ul><li>{html.escape(_network_line(guest))}</li></ul>
+                        <ul><li>{escape_html(_network_line(guest))}</li></ul>
                     </div>
                     <div class="network-card service">
                         <div class="network-card-header">Servicenetz</div>
-                        <ul><li>{html.escape(_network_line(service))}</li></ul>
+                        <ul><li>{escape_html(_network_line(service))}</li></ul>
                     </div>
                 </div>
                 <div class="network-settings-panel network-info">
                     <h3>Internet &amp; WAN</h3>
                     <ul>
-                        <li>Modus: <strong>{html.escape(_mode_label(settings.mode))}</strong></li>
-                        <li>IPv4: <strong>{html.escape(_ipv4_label(settings.ipv4_mode))}</strong></li>
-                        <li>IPv6: <strong>{html.escape(_ipv6_label(settings.ipv6_mode))}</strong></li>
-                        <li>MTU: <strong>{html.escape(settings.mtu or 'k.A.')}</strong></li>
-                        <li>WAN VLAN: <strong>{html.escape(_format_toggle_state(settings.wan_vlan))}</strong></li>
-                        <li>TR-069: <strong>{html.escape(_format_toggle_state(settings.tr069))}</strong></li>
-                        <li>SNMP auf WAN: <strong>{html.escape(_format_toggle_state(settings.snmp_wan))}</strong></li>
+                        <li>Modus: <strong>{escape_html(_mode_label(settings.mode))}</strong></li>
+                        <li>IPv4: <strong>{escape_html(_ipv4_label(settings.ipv4_mode))}</strong></li>
+                        <li>IPv6: <strong>{escape_html(_ipv6_label(settings.ipv6_mode))}</strong></li>
+                        <li>MTU: <strong>{escape_html(settings.mtu or 'k.A.')}</strong></li>
+                        <li>WAN VLAN: <strong>{escape_html(_format_toggle_state(settings.wan_vlan))}</strong></li>
+                        <li>TR-069: <strong>{escape_html(_format_toggle_state(settings.tr069))}</strong></li>
+                        <li>SNMP auf WAN: <strong>{escape_html(_format_toggle_state(settings.snmp_wan))}</strong></li>
                     </ul>
                     <h3>Services &amp; Einstellungen</h3>
                     <ul>
-                        <li>DynDNS: <strong>{html.escape(_format_toggle_state(settings.dyn_dns))}</strong></li>
-                        <li>E-Mail Reports: <strong>{html.escape(_format_toggle_state(settings.email_reports))}</strong></li>
-                        <li>Expertenmodus: <strong>{html.escape(_format_toggle_state(settings.expert_mode))}</strong></li>
-                        <li>Versteckte Menüs: <strong>{html.escape(hidden_line)}</strong></li>
+                        <li>DynDNS: <strong>{escape_html(_format_toggle_state(settings.dyn_dns))}</strong></li>
+                        <li>E-Mail Reports: <strong>{escape_html(_format_toggle_state(settings.email_reports))}</strong></li>
+                        <li>Expertenmodus: <strong>{escape_html(_format_toggle_state(settings.expert_mode))}</strong></li>
+                        <li>Versteckte Menüs: <strong>{escape_html(hidden_line)}</strong></li>
                     </ul>
                 </div>
             </div>
@@ -3432,10 +3455,10 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
         else:
             role_label = "Client"
         hover_lines = [
-            f"<b>{html.escape(name)}</b>",
+            f"<b>{escape_html(name)}</b>",
             f"Rolle: {role_label}",
-            f"Typ: {html.escape(node_type)}",
-            f"MAC: {html.escape(node.get('device_mac_address') or 'k.A.')}",
+            f"Typ: {escape_html(node_type)}",
+            f"MAC: {escape_html(node.get('device_mac_address') or 'k.A.')}",
         ]
         if is_infra:
             visual_nodes.append(
@@ -5899,8 +5922,8 @@ def build_dashboard(text: str) -> None:
             textwrap.dedent(
                 f"""\
                 <div class="info-frame-load-card">
-                    <div class="info-frame-label">{html.escape(label)}</div>
-                    <div class="info-frame-value">{html.escape(value)}</div>
+                    <div class="info-frame-label">{escape_html(label)}</div>
+                    <div class="info-frame-value">{escape_html(value)}</div>
                 </div>
                 """
             ).strip()
@@ -5920,8 +5943,8 @@ def build_dashboard(text: str) -> None:
         textwrap.dedent(
             f"""\
             <div class="info-frame-card">
-                <div class="info-frame-label">{html.escape(label)}</div>
-                <div class="info-frame-value">{html.escape(value)}</div>
+                <div class="info-frame-label">{escape_html(label)}</div>
+                <div class="info-frame-value">{escape_html(value)}</div>
             </div>
             """
         ).strip()
@@ -5970,7 +5993,7 @@ def build_dashboard(text: str) -> None:
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
-    mac_value_safe = html.escape(mac_value)
+    mac_value_safe = escape_html(mac_value)
     st.markdown(
         textwrap.dedent(
             f"""\
@@ -6358,7 +6381,11 @@ def main() -> None:
         st.info("Bitte eine Support-Data TXT hochladen.")
         return
 
-    text = uploaded_file.read().decode("utf-8", errors="ignore")
+    try:
+        text = decode_support_data_upload(uploaded_file.name, uploaded_file.read())
+    except ValueError as exc:
+        st.error(str(exc))
+        return
     build_dashboard(text)
 
 
