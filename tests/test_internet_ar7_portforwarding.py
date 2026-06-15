@@ -1,6 +1,7 @@
 import unittest
 
 import app
+from support_viewer.parsers.internet_connection import parse_internet_connection
 from support_viewer.parsers.port_forwarding import parse_port_forwardings
 
 
@@ -167,6 +168,9 @@ tr069_activated yes
 class InternetAr7PortForwardingSyntheticTests(unittest.TestCase):
     def test_app_parse_port_forwardings_reexports_parser_module_function(self):
         self.assertIs(app.parse_port_forwardings, parse_port_forwardings)
+
+    def test_app_parse_internet_connection_reexports_parser_module_function(self):
+        self.assertIs(app.parse_internet_connection, parse_internet_connection)
 
     def test_parse_internet_connection_active_pppoe_with_ipv4_ipv6_dns_masquerading_and_vlan(self):
         connection = app.parse_internet_connection(UI_CONNECTIONS_PPPOE)
