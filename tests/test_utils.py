@@ -37,8 +37,15 @@ other = value"""
 
         self.assertIsNone(utils.extract_value(block, "missing"))
         self.assertIsNone(utils.extract_value("empty =", "empty"))
-        self.assertEqual(utils.extract_value(block, "empty"), "blank =")
-        self.assertEqual(utils.extract_value(block, "blank"), "other = value")
+        self.assertIsNone(utils.extract_value(block, "empty"))
+        self.assertIsNone(utils.extract_value(block, "blank"))
+        self.assertEqual(utils.extract_value(block, "other"), "value")
+
+    def test_extract_value_empty_line_does_not_consume_next_key(self):
+        block = "key =    \nnext_key = value"
+
+        self.assertIsNone(utils.extract_value(block, "key"))
+        self.assertEqual(utils.extract_value(block, "next_key"), "value")
 
     def test_extract_section_returns_content_between_markers(self):
         text = "before <start>\nvalue\n<end> after"
