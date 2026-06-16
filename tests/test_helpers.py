@@ -834,6 +834,17 @@ free hws 4089 / 4096
         self.assertEqual(summary["free_hws"], 4089)
         self.assertEqual(summary["max_hws"], 4096)
 
+    def test_ppe_hw_sessions_metric_includes_free_hws_when_available(self):
+        summary = {"used_hws": 7, "free_hws": 4089, "max_hws": 4096}
+        self.assertEqual(
+            app.format_ppe_hw_sessions(summary, {"total": 7}),
+            "7 genutzt / 4089 frei / 4096 max",
+        )
+
+    def test_ppe_hw_sessions_metric_keeps_legacy_used_max_when_free_missing(self):
+        summary = {"used_hws": 7, "free_hws": None, "max_hws": 4096}
+        self.assertEqual(app.format_ppe_hw_sessions(summary, {"total": 7}), "7 / 4096")
+
     def test_all_documented_offload_error_counters_get_expected_severity(self):
         text = """Common PPE offload counter:
   no free hws: 1
