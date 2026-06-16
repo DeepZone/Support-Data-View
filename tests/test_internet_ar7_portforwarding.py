@@ -1,7 +1,7 @@
 import unittest
 
 import app
-from support_viewer.parsers.ar7 import parse_ar7_overview
+from support_viewer.parsers.ar7 import parse_ar7_network_settings, parse_ar7_overview
 from support_viewer.parsers.ar7_helpers import (
     extract_ar7_named_blocks,
     extract_ar7cfg_body,
@@ -221,6 +221,9 @@ class InternetAr7PortForwardingSyntheticTests(unittest.TestCase):
 
     def test_app_parse_internet_connection_reexports_parser_module_function(self):
         self.assertIs(app.parse_internet_connection, parse_internet_connection)
+
+    def test_app_parse_ar7_network_settings_reexports_parser_module_function(self):
+        self.assertIs(app.parse_ar7_network_settings, parse_ar7_network_settings)
 
     def test_parse_internet_connection_active_pppoe_with_ipv4_ipv6_dns_masquerading_and_vlan(self):
         connection = app.parse_internet_connection(UI_CONNECTIONS_PPPOE)
