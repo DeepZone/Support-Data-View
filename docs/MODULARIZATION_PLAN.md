@@ -1,6 +1,61 @@
 # Modularisierungsplan für `app.py`
 
-Stand: 2026-06-15. Diese Datei ist eine reine Analyse- und Plan-Datei; sie beschreibt risikoarme Schritte zur Trennung von Parserlogik, Datenmodellen und Streamlit-Rendering ohne funktionale Änderungen.
+Stand: 2026-06-16. Diese Datei ist eine reine Analyse- und Plan-Datei; sie beschreibt den aktuellen Modularisierungsstand und die verbleibenden risikoarmen Schritte zur Trennung von Parserlogik, Datenmodellen und Streamlit-Rendering ohne funktionale Änderungen.
+
+## 0. Aktueller Modularisierungsstand am 2026-06-16
+
+Die Modularisierung ist inzwischen gestartet. `app.py` ist weiterhin die zentrale Streamlit-Anwendung und Kompatibilitätsfassade, importiert aber bereits Modelle, allgemeine Helper und mehrere Parser aus dem Paket `support_viewer`. Diese Dokumentation beschreibt den Ist-Zustand; sie ist keine Vorgabe für App-Codeänderungen in diesem PR.
+
+### 0.1 Inzwischen existierende Module
+
+- `support_viewer/models.py`: enthält die bisher zentralisierten Dataclasses für WLAN, LAN/Mesh, Telefonie, Events, Ratelimiter/PPE-Findings, Internet, Portfreigaben, DECT, AR7 und AVM-Counter.
+- `support_viewer/utils.py`: enthält frameworkfreie Text-, Zahlen- und Bereichshelper wie Section-Extraktion, Wert-Extraktion, optionale Float-/Integer-Parser, HTML-Escaping und Frequenzbereichs-Parsing.
+- `support_viewer/parsers/events.py`: enthält `parse_events()`.
+- `support_viewer/parsers/telephony.py`: enthält `parse_voip_accounts()` samt lokalem Registrierungsstatus-Helper.
+- `support_viewer/parsers/dect.py`: enthält DECT-RSSI-Mapping, DECT-RSSI-Wertparser, Modellnormalisierung, Geräteparser und Basisinfo-Parser.
+- `support_viewer/parsers/port_forwarding.py`: enthält `parse_port_forwardings()`.
+- `support_viewer/parsers/internet_connection.py`: enthält `parse_internet_connection()` sowie InternetConnection-spezifische private Helper.
+- `support_viewer/parsers/ar7.py`: enthält `parse_ar7_overview()`, `parse_ar7_network_settings()` und AR7-spezifische Auswertungshelper wie `_dsl_encap_label()` und `_extract_hidden_menus()`.
+- `support_viewer/parsers/ar7_helpers.py`: enthält wiederverwendete AR7-Extraktionshelper für `ar7cfg`, Quotes, Blockwerte und benannte Blöcke.
+
+### 0.2 Parser und Analysefunktionen, die weiterhin in `app.py` liegen
+
+Folgende Parserdomänen sind noch nicht ausgelagert und bleiben aktuell in `app.py`:
+
+- **DSL:** `extract_training_state()`, `is_showtime_state()`, `parse_dsl_snr()`, `parse_dsl_metrics()` und die Nutzung allgemeiner DSL-Extraktionshelper.
+- **Fiber:** `parse_fiber_overview()`.
+- **DOCSIS/Cable:** `extract_docsis_state()`, `parse_docsis_value()`, `parse_table_rows()`, `is_plausible_channel()`, `parse_docsis_channels()`, `parse_cable_spectrum()`, `build_cable_usage_ranges()`.
+- **WLAN/LAN/Mesh/Netzauslastung:** `format_radio_label()`, `parse_wlan_env_scan()`, `parse_wlan_stations()`, `parse_wlan_radio_load()`, `parse_wlan_noisefloor()`, `parse_lan_ports()`, `parse_neighbour_clients()`, `parse_mesh_topology()`, `build_mesh_positions()`, `is_mesh_client_connected()`, `parse_avm_counter_rrd_sections()`, `parse_avm_counter_values()`, `summarize_avm_counter_values()`.
+- **Metadaten und Upload-nahe Parser:** `extract_device_mac()`, `parse_fritz_model()`, `parse_fritz_uptime_line()`, `parse_fritz_uptime_days_minutes()`, `parse_fritz_load_average()`, `parse_fritz_firmware_version()`.
+- **Access-Erkennung:** `detect_access_technology()` bleibt als Cross-Domain-Erkennung in `app.py`.
+- **PPE/HWPA/VLAN/Ratelimiter/Performance:** alle Parser-, Korrelations- und Analysefunktionen dieser Domäne, einschließlich `parse_ratelimiter_runtime()`, `parse_ratelimiter_config()`, `parse_hardware_ratelimiter_sessions()`, `analyze_hardware_ratelimiter_sessions()`, `parse_drop_indicators()`, `parse_offload_indicators()`, PPE-Parser, VLAN-/Networking-Korrelation, `parse_ppe_diagnosis()` und `analyze_connection_performance()`.
+- **Orchestrierung:** `parse_support_data()` bleibt in `app.py` und ruft sowohl ausgelagerte als auch noch lokale Parser auf.
+
+Renderingfunktionen liegen weiterhin vollständig in `app.py`; es existiert noch kein `support_viewer/rendering/`-Paket.
+
+### 0.3 Bewusste `app.<name>`-Re-Exports als Kompatibilitätsschicht
+
+`app.py` importiert ausgelagerte Namen weiterhin auf Modulebene. Dadurch bleiben bestehende Tests, Skripte oder Nutzer, die `import app` verwenden, kompatibel. Diese Re-Exports sind bewusst und sollten bis zu einer ausdrücklich geplanten Breaking-Change-Phase erhalten bleiben. Dazu gehören insbesondere:
+
+- Dataclasses aus `support_viewer.models`, z. B. `WifiStation`, `WifiNetwork`, `LanPort`, `TelephonyAccount`, `EventEntry`, `InternetConnection`, `PortForwarding`, `DectDevice`, `DectBasisInfo`, `Ar7Overview`, `Ar7NetworkSettings`, `AvmCounterSection` und weitere Modelle.
+- Utility-Funktionen aus `support_viewer.utils`, z. B. `escape_html()`, `extract_section()`, `extract_section_by_prefix()`, `extract_value()`, `extract_numeric_array()`, `extract_numeric_array_loose()`, `extract_int_value()`, `extract_float_value()`, `extract_kbits_rate()`, `extract_section_block()`, `extract_section_between()`, `parse_optional_float()`, `parse_channel_float()`, `parse_int()` und `_parse_frequency_range()`.
+- Ausgelagerte Parser aus `support_viewer.parsers.*`, z. B. `parse_events()`, `parse_voip_accounts()`, `extract_dect_rssi_index_to_dbm()`, `parse_dect_rssi_value()`, `parse_dect_model()`, `parse_dect_device_info()`, `parse_dect_basis_info()`, `parse_port_forwardings()`, `parse_internet_connection()`, `parse_ar7_overview()` und `parse_ar7_network_settings()`.
+
+### 0.4 Noch offene Bereiche für spätere Modularisierung
+
+- **DSL:** weiterhin in `app.py`; sinnvoller nächster reiner Struktur-PR, falls keine Featurearbeit priorisiert wird.
+- **Fiber:** weiterhin in `app.py`; klein und gut isolierbar.
+- **DOCSIS/Cable:** weiterhin in `app.py`; wegen Tabellenlogik und Plausibilitätsfiltern etwas risikoreicher als Fiber.
+- **WLAN/LAN/Mesh:** weiterhin in `app.py`; enthält Parser, Layout-/Positionslogik und Rendering-nahe Übergänge.
+- **PPE/HWPA/VLAN:** weiterhin in `app.py`; größte und am stärksten gekoppelte Domäne, daher später und in mehreren PRs.
+- **Rendering/UI:** weiterhin in `app.py`; sollte erst nach stabilen Parsermodulen verschoben werden.
+- **`parse_support_data()`-Orchestrierung:** weiterhin in `app.py`; kann später nach `support_viewer/orchestrator.py`, sobald die Mehrheit der Parser stabil ausgelagert ist.
+
+### 0.5 Zeitpunkt für neue Features
+
+Neue Features können ab jetzt sinnvoll eingebaut werden. Sie sollten jedoch als getrennte Feature-PRs laufen und nicht mit reinen Struktur-/Move-PRs vermischt werden. Dadurch bleiben Regressionsrisiko und Review-Aufwand niedrig: Struktur-PRs verschieben Code ohne fachliche Änderung, Feature-PRs ändern Verhalten gezielt und testbar.
+
+Empfehlung für den ersten Feature-PR: ein kleines, parsernahes Feature mit klarer synthetischer Testabdeckung wählen, z. B. eine zusätzliche Fiber- oder DSL-Kennzahl. Wenn vorher noch ein Struktur-PR gewünscht ist, ist Fiber weiterhin die risikoärmste nächste Auslagerung.
 
 ## 1. Aktuelle Struktur
 
