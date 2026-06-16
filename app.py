@@ -22,6 +22,10 @@ from support_viewer.parsers.dect import (
 )
 from support_viewer.parsers.events import parse_events
 from support_viewer.parsers.ar7 import parse_ar7_overview
+from support_viewer.parsers.ar7_helpers import (
+    extract_ar7cfg_body as _extract_ar7cfg_body,
+    find_ar7_block_value as _find_block_value,
+)
 from support_viewer.parsers.internet_connection import parse_internet_connection
 from support_viewer.parsers.port_forwarding import parse_port_forwardings
 from support_viewer.parsers.telephony import parse_voip_accounts
@@ -731,35 +735,6 @@ def is_showtime_state(state: Optional[str]) -> bool:
 
 
 
-def _extract_ar7cfg_body(text: str) -> str:
-    section = extract_section_by_prefix(text, "##### BEGIN SECTION ar7_cfg /var/flash/ar7.cfg")
-    if not section:
-        return ""
-    start = section.find("ar7cfg {")
-    if start == -1:
-        return ""
-    brace_level = 0
-    end = None
-    for index in range(start, len(section)):
-        char = section[index]
-        if char == "{":
-            brace_level += 1
-        elif char == "}":
-            brace_level -= 1
-            if brace_level == 0:
-                end = index + 1
-                break
-    if end is None:
-        return section[start:]
-    return section[start:end]
-
-
-def _strip_quotes(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    return value.strip().rstrip(';').strip().strip('"').strip("'")
-
-
 def _format_toggle_state(value: Optional[object]) -> str:
     if value is None:
         return "k.A."
@@ -802,10 +777,6 @@ def _ipv6_label(raw_mode: Optional[str]) -> str:
     return mapping.get((raw_mode or "").strip().lower(), raw_mode or "k.A.")
 
 
-def _find_block_value(block: str, key: str) -> Optional[str]:
-    return _strip_quotes(extract_value(block, key))
-
-
 def _extract_hidden_menus(ar7cfg_body: str) -> List[str]:
     hidden_fields = {
         "ipv6_hidden": "IPv6",
@@ -819,35 +790,6 @@ def _extract_hidden_menus(ar7cfg_body: str) -> List[str]:
         if value and value.lower() == "no":
             visible.append(label)
     return visible
-
-
-def _extract_named_blocks(text: str, block_name: str) -> List[str]:
-    blocks = []
-    pattern = re.compile(rf"{re.escape(block_name)}\s*\{{")
-    for match in pattern.finditer(text):
-        start = match.end() - 1
-        brace_level = 0
-        for index in range(start, len(text)):
-            char = text[index]
-            if char == "{":
-                brace_level += 1
-            elif char == "}":
-                brace_level -= 1
-                if brace_level == 0:
-                    blocks.append(text[start + 1:index])
-                    break
-    return blocks
-
-
-def _dsl_encap_label(raw_value: Optional[str]) -> Optional[str]:
-    if not raw_value:
-        return None
-    normalized = raw_value.strip().lower()
-    mapping = {
-        "dslencap_ether": "DHCP",
-        "dslencap_pppoe": "PPPoE",
-    }
-    return mapping.get(normalized, raw_value)
 
 
 def parse_ar7_network_settings(text: str) -> Ar7NetworkSettings:

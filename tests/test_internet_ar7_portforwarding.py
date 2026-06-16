@@ -2,6 +2,11 @@ import unittest
 
 import app
 from support_viewer.parsers.ar7 import parse_ar7_overview
+from support_viewer.parsers.ar7_helpers import (
+    extract_ar7_named_blocks,
+    extract_ar7cfg_body,
+    find_ar7_block_value,
+)
 from support_viewer.parsers.internet_connection import parse_internet_connection
 from support_viewer.parsers.port_forwarding import parse_port_forwardings
 
@@ -186,6 +191,28 @@ ipv4_connstatus connected
 tr069_activated yes
 ##### END SECTION Networking Supportdata networking
 """
+
+
+class Ar7HelperTest(unittest.TestCase):
+    def test_extract_ar7cfg_body_returns_balanced_ar7_block_only(self):
+        text = AR7_CFG + "\ntrailing text outside section"
+
+        body = extract_ar7cfg_body(text)
+
+        self.assertTrue(body.startswith("ar7cfg {"))
+        self.assertTrue(body.rstrip().endswith("}"))
+        self.assertIn("brinterfaces {", body)
+        self.assertNotIn("trailing text outside section", body)
+
+    def test_extract_ar7_named_blocks_and_values_handle_nested_blocks_and_quotes(self):
+        body = extract_ar7cfg_body(AR7_CFG)
+
+        brinterfaces = extract_ar7_named_blocks(body, "brinterfaces")
+        dslifaces = extract_ar7_named_blocks(body, "dslifaces")
+
+        self.assertEqual(find_ar7_block_value(brinterfaces[0], "name"), "lan")
+        self.assertEqual(find_ar7_block_value(body, "active_provider"), "synthetic-provider")
+        self.assertIn("vlancfg {", dslifaces[0])
 
 
 class InternetAr7PortForwardingSyntheticTests(unittest.TestCase):
