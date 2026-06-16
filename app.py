@@ -4408,6 +4408,18 @@ def _render_ppe_network_correlation(data: dict) -> None:
                 hide_index=True,
             )
 
+
+def format_ppe_hw_sessions(summary: dict, sessions: dict) -> str:
+    used_hws = summary.get("used_hws")
+    free_hws = summary.get("free_hws")
+    max_hws = summary.get("max_hws")
+    used_value = used_hws if used_hws is not None else sessions.get("total", 0)
+    max_value = max_hws if max_hws is not None else "k.A."
+    if free_hws is not None:
+        return f"{used_value} genutzt / {free_hws} frei / {max_value} max"
+    return f"{used_value} / {max_value}"
+
+
 def render_ppe_diagnosis(data: dict) -> None:
     st.subheader("PPE Diagnose / Packet Processing Engine")
     assessment = data["assessment"]
@@ -4421,7 +4433,7 @@ def render_ppe_diagnosis(data: dict) -> None:
         ("IPv4", state.get("ipv4") or "k.A."),
         ("IPv6", state.get("ipv6") or "k.A."),
         ("Ratelimiter", state.get("ratelimiter") or "k.A."),
-        ("HW Sessions", f"{data['summary'].get('used_hws') if data['summary'].get('used_hws') is not None else data['sessions'].get('total', 0)} / {data['summary'].get('max_hws') or 'k.A.'}"),
+        ("HW Sessions", format_ppe_hw_sessions(data["summary"], data["sessions"])),
         ("PPE Devices", data["counts"]["registered_devices"]),
         ("VLAN / PPPoE", f"{data['counts']['vlan_devices']} / {data['counts']['pppoe_devices']}"),
         ("Bridge / Ports", f"{data['counts']['bridge_devices']} / {data['counts']['physical_ports']}"),
