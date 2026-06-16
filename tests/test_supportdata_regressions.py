@@ -101,6 +101,16 @@ class UploadAndHtmlRegressionTests(unittest.TestCase):
             'SSID &quot;Lab&quot; &lt;script&gt;alert(1)&lt;/script&gt;',
         )
 
+    def test_mac_copy_component_escapes_display_and_serializes_copy_value(self):
+        html = app.build_mac_address_copy_component_html('AA:BB:"<>&:CC')
+
+        self.assertIn('AA:BB:&quot;&lt;&gt;&amp;:CC', html)
+        self.assertIn('const macaValue = "AA:BB:\\"<>&:CC";', html)
+        self.assertIn('button.addEventListener("click"', html)
+        self.assertIn('navigator.clipboard.writeText(macaValue)', html)
+        self.assertIn('fallbackCopy(macaValue)', html)
+        self.assertNotIn('data-copy="AA:BB:"<>&:CC"', html)
+
     def test_upload_decoder_accepts_uppercase_txt_and_drops_invalid_utf8(self):
         decoded = app.decode_support_data_upload("SUPPORT.TXT", b"valid\xff text")
 

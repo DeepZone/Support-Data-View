@@ -375,6 +375,147 @@ def extract_device_mac(text: str) -> Optional[str]:
     return match.group(1).upper()
 
 
+def build_mac_address_copy_component_html(mac_value: str, mac_label: str = "MACa Adresse") -> str:
+    mac_value_safe = escape_html(mac_value)
+    mac_label_safe = escape_html(mac_label)
+    mac_value_json = json.dumps(mac_value)
+    copied_label_json = json.dumps("Kopiert")
+    copy_label_json = json.dumps("Kopieren")
+    failed_label_json = json.dumps("Fehler")
+
+    return textwrap.dedent(
+        f"""\
+        <div class="mac-address-card" aria-label="{mac_label_safe}">
+            <div class="mac-address-title">{mac_label_safe}</div>
+            <div class="mac-address-row">
+                <div class="mac-address-value" id="mac-address-value">{mac_value_safe}</div>
+                <button class="mac-address-copy" type="button" aria-label="MAC-Adresse kopieren">
+                    Kopieren
+                </button>
+            </div>
+            <div class="mac-address-copy-status" aria-live="polite"></div>
+        </div>
+        <script>
+        const macaValue = {mac_value_json};
+        const button = document.querySelector(".mac-address-copy");
+        const status = document.querySelector(".mac-address-copy-status");
+
+        if (window.frameElement) {{
+            window.frameElement.style.position = "fixed";
+            window.frameElement.style.top = "2.5rem";
+            window.frameElement.style.right = "1.25rem";
+            window.frameElement.style.width = "min(26rem, calc(100vw - 2.5rem))";
+            window.frameElement.style.height = "6.25rem";
+            window.frameElement.style.zIndex = "2000";
+        }}
+
+        function setButtonState(label, cssClass, message) {{
+            button.textContent = label;
+            button.classList.remove("copied", "failed");
+            if (cssClass) {{
+                button.classList.add(cssClass);
+            }}
+            status.textContent = message || "";
+        }}
+
+        function fallbackCopy(value) {{
+            const textarea = document.createElement("textarea");
+            textarea.value = value;
+            textarea.setAttribute("readonly", "");
+            textarea.style.position = "fixed";
+            textarea.style.left = "-9999px";
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {{
+                return document.execCommand("copy");
+            }} finally {{
+                document.body.removeChild(textarea);
+            }}
+        }}
+
+        button.addEventListener("click", async () => {{
+            try {{
+                if (navigator.clipboard && window.isSecureContext) {{
+                    await navigator.clipboard.writeText(macaValue);
+                }} else if (!fallbackCopy(macaValue)) {{
+                    throw new Error("Fallback copy failed");
+                }}
+                setButtonState({copied_label_json}, "copied", "MAC-Adresse kopiert.");
+                setTimeout(() => setButtonState({copy_label_json}, "", ""), 1500);
+            }} catch (error) {{
+                console.error("MAC-Adresse konnte nicht kopiert werden.", error);
+                setButtonState({failed_label_json}, "failed", "Kopieren fehlgeschlagen.");
+            }}
+        }});
+        </script>
+        <style>
+        html, body {{
+            margin: 0;
+            overflow: hidden;
+            background: transparent;
+            color: var(--text-color, inherit);
+            font-family: "Source Sans Pro", sans-serif;
+        }}
+        .mac-address-card {{
+            box-sizing: border-box;
+            padding: 0.6rem 0.9rem;
+            border-radius: 0.6rem;
+            background: var(--secondary-background-color, #f6f8fa);
+            color: var(--text-color, #31333f);
+            border: 1px solid rgba(120, 120, 120, 0.25);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+        }}
+        .mac-address-title {{
+            font-size: 0.75rem;
+            opacity: 0.7;
+            margin-bottom: 0.15rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }}
+        .mac-address-value {{
+            font-weight: 600;
+            font-size: 0.95rem;
+            word-break: break-all;
+        }}
+        .mac-address-row {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+        }}
+        .mac-address-copy {{
+            border: 1px solid rgba(120, 120, 120, 0.4);
+            background: transparent;
+            color: inherit;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.4rem;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease;
+            white-space: nowrap;
+        }}
+        .mac-address-copy:hover {{
+            background: rgba(120, 120, 120, 0.15);
+        }}
+        .mac-address-copy.copied {{
+            background: rgba(76, 175, 80, 0.2);
+            color: #2e7d32;
+        }}
+        .mac-address-copy.failed {{
+            background: rgba(244, 67, 54, 0.2);
+            color: #b71c1c;
+        }}
+        .mac-address-copy-status {{
+            min-height: 1rem;
+            margin-top: 0.15rem;
+            font-size: 0.72rem;
+            opacity: 0.8;
+        }}
+        </style>
+        """
+    )
+
+
 def parse_fritz_model(text: str) -> Optional[str]:
     match = re.search(r"^CONFIG_PRODUKT_NAME\s*=\s*(.+)$", text, re.MULTILINE)
     if not match:
@@ -5068,28 +5209,9 @@ def build_dashboard(text: str) -> None:
 
     mac_label = "MACa Adresse"
     mac_value = device_mac or "Keine MAC-Adresse gefunden"
-    mac_value_safe = escape_html(mac_value)
-    st.markdown(
-        textwrap.dedent(
-            f"""\
-            <div class="mac-address-card" aria-label="{mac_label}">
-                <div class="mac-address-title">{mac_label}</div>
-                <div class="mac-address-row">
-                    <div class="mac-address-value" id="mac-address-value">{mac_value_safe}</div>
-                    <button
-                        class="mac-address-copy"
-                        type="button"
-                        aria-label="MAC-Adresse kopieren"
-                        data-copy="{mac_value_safe}"
-                        onclick="navigator.clipboard.writeText(this.dataset.copy); this.classList.add('copied'); this.textContent='Kopiert'; setTimeout(() => {{ this.classList.remove('copied'); this.textContent='Kopieren'; }}, 1500);"
-                    >
-                        Kopieren
-                    </button>
-                </div>
-            </div>
-            """
-        ),
-        unsafe_allow_html=True,
+    components.html(
+        build_mac_address_copy_component_html(mac_value, mac_label),
+        height=100,
     )
 
     tab_names = [access_technology, "Internet", "LAN", "WLAN", "Netzauslastung", "PPE Diagnose", "Anschluss-Performance", "Mesh", "Telefonie", "DECT", "AR7", "Events"]
