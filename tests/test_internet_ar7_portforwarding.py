@@ -52,6 +52,28 @@ ip6_prefix = 2001:db8:2::/56
 ##### END SECTION UI connections synthetic
 """
 
+
+UI_CONNECTIONS_EMPTY_OPTIONAL_FIELDS = """##### BEGIN SECTION UI connections synthetic
+opmode = opmode_eth_ipclient
+connection0/
+name = empty-optionals
+is_active_internet_connection = 1
+use_dhcp = 1
+dslencap = dslencap_ether
+ip4_addr =
+ip4_first_dns = 198.51.100.53
+ip4_second_dns = 0.0.0.0
+ip4_masqaddr = 192.0.2.1
+ip6_addr =
+ip6_first_dns = 2001:db8::53
+ip6_second_dns = ::
+ip6_prefix =
+vlanencap = vlanencap_fixed_prio
+vlanid = 42
+vlanprio = 5
+##### END SECTION UI connections synthetic
+"""
+
 PORT_FORWARDINGS = """##### BEGIN SECTION port_forwards IPv4 forwardings synthetic
 --- Active IPv4 Portforwardings ---
 web TCP 192.0.2.20 8443 203.0.113.10 443 "HTTPS test service"
@@ -185,6 +207,20 @@ class InternetAr7PortForwardingSyntheticTests(unittest.TestCase):
         self.assertEqual(connection.ipv6_address, "2001:db8::10")
         self.assertEqual(connection.ipv6_dns, ["2001:db8::53"])
         self.assertEqual(connection.ipv6_masq, "2001:db8:1::/56")
+
+    def test_parse_internet_connection_empty_optional_fields_do_not_consume_following_keys(self):
+        connection = parse_internet_connection(UI_CONNECTIONS_EMPTY_OPTIONAL_FIELDS)
+
+        self.assertIsNotNone(connection)
+        self.assertEqual(connection.name, "empty-optionals")
+        self.assertEqual(connection.access_type, "DHCP (RBE)")
+        self.assertIsNone(connection.ipv4_address)
+        self.assertEqual(connection.ipv4_dns, ["198.51.100.53"])
+        self.assertEqual(connection.ipv4_masq, "192.0.2.1")
+        self.assertIsNone(connection.ipv6_address)
+        self.assertEqual(connection.ipv6_dns, ["2001:db8::53"])
+        self.assertIsNone(connection.ipv6_masq)
+        self.assertEqual(connection.vlan, "42 (Prio 5)")
 
     def test_parse_internet_connection_dhcp_rbe_without_vlan_and_complete_dns_lists(self):
         connection = app.parse_internet_connection(UI_CONNECTIONS_DHCP_RBE)
