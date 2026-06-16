@@ -28,10 +28,11 @@ def extract_section_by_prefix(text: str, start_marker: str) -> str:
 
 
 def extract_value(block: str, key: str) -> Optional[str]:
-    match = re.search(rf"^\s*{re.escape(key)}\s*=\s*(.+)$", block, re.MULTILINE)
+    match = re.search(rf"^[ \t]*{re.escape(key)}[ \t]*=[ \t]*([^\r\n]*)", block, re.MULTILINE)
     if not match:
         return None
-    return match.group(1).strip().strip("'")
+    value = match.group(1).strip().strip("'")
+    return value or None
 
 
 def extract_numeric_array(text: str, label: str) -> List[int]:
