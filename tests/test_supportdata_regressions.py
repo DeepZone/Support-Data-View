@@ -1,5 +1,7 @@
 import unittest
 
+import pandas as pd
+
 import app
 
 
@@ -110,6 +112,15 @@ class UploadAndHtmlRegressionTests(unittest.TestCase):
         self.assertIn('navigator.clipboard.writeText(macaValue)', html)
         self.assertIn('fallbackCopy(macaValue)', html)
         self.assertNotIn('data-copy="AA:BB:"<>&:CC"', html)
+
+
+    def test_normalize_display_dataframe_stringifies_mixed_object_values(self):
+        df = pd.DataFrame({"Wert": [1, "zwei", b"drei\xff", None]})
+
+        normalized = app.normalize_display_dataframe(df)
+
+        self.assertEqual(list(normalized["Wert"]), ["1", "zwei", "drei�", pd.NA])
+        self.assertEqual(list(df["Wert"]), [1, "zwei", b"drei\xff", None])
 
     def test_upload_decoder_accepts_uppercase_txt_and_drops_invalid_utf8(self):
         decoded = app.decode_support_data_upload("SUPPORT.TXT", b"valid\xff text")
