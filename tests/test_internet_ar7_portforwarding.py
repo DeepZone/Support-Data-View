@@ -1,6 +1,7 @@
 import unittest
 
 import app
+from support_viewer.parsers.ar7 import parse_ar7_overview
 from support_viewer.parsers.internet_connection import parse_internet_connection
 from support_viewer.parsers.port_forwarding import parse_port_forwardings
 
@@ -260,6 +261,9 @@ allow-only-from 198.51.100.10
 ##### END SECTION port_forwards IPv4 forwardings synthetic
 """
         self.assertEqual(app.parse_port_forwardings(incomplete), [])
+
+    def test_app_reexports_ar7_overview_parser(self):
+        self.assertIs(app.parse_ar7_overview, parse_ar7_overview)
 
     def test_parse_ar7_overview_extracts_bridge_vcc_vlan_and_dsl_iface_details(self):
         overview = app.parse_ar7_overview(AR7_CFG)
