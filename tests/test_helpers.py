@@ -864,6 +864,53 @@ Accelerator state:
         self.assertEqual(counters["add/remove vlan dev to ppe err"]["severity"], "critical")
         self.assertEqual(counters["add/remove pppoe dev to ppe err"]["severity"], "critical")
 
+    def test_ppe_offload_error_counter_warnings_skip_zero_values(self):
+        counters = app.parse_common_ppe_offload_counters("""Common PPE offload counter:
+  no free hws: 0
+  offload failed: 0
+  dev not registered in ppe: 0
+Accelerator state:
+  ipv4: enabled
+""")
+
+        self.assertEqual(app.format_ppe_offload_error_counter_warnings(counters), [])
+
+    def test_ppe_offload_error_counter_warnings_include_counter_name_and_value(self):
+        counters = app.parse_common_ppe_offload_counters("""Common PPE offload counter:
+  no free hws: 1
+  offload failed: 0
+Accelerator state:
+  ipv4: enabled
+""")
+
+        warnings = app.format_ppe_offload_error_counter_warnings(counters)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["severity"], "critical")
+        self.assertIn("no free hws", warnings[0]["message"])
+        self.assertIn("1", warnings[0]["message"])
+
+    def test_ppe_offload_error_counter_warnings_include_multiple_relevant_counters(self):
+        counters = app.parse_common_ppe_offload_counters("""Common PPE offload counter:
+  no free hws: 2
+  offload failed: 3
+  invalid egress mac: 4
+  fallback offloads: 5
+Accelerator state:
+  ipv4: enabled
+""")
+
+        warnings = app.format_ppe_offload_error_counter_warnings(counters)
+        messages = " ".join(row["message"] for row in warnings)
+
+        self.assertIn("no free hws", messages)
+        self.assertIn("2", messages)
+        self.assertIn("offload failed", messages)
+        self.assertIn("3", messages)
+        self.assertIn("invalid egress mac", messages)
+        self.assertIn("4", messages)
+        self.assertNotIn("fallback offloads", messages)
+
     def test_vlan_services_correlate_with_ppe_and_pppoe_registration(self):
         data = app.parse_ppe_diagnosis(self.PPE_MAP + self.SERVICE_NETWORKING)
         rows = {row["service"]: row for row in data["serviceVlanPpeCorrelation"]}

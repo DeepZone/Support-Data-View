@@ -3440,6 +3440,23 @@ def build_ppe_device_tree(devices: List[dict]) -> List[str]:
     return lines
 
 
+def format_ppe_offload_error_counter_warnings(counters: List[dict]) -> List[dict]:
+    """Return prominent PPE/HWPA offload error counter messages for non-zero counters."""
+    warnings: List[dict] = []
+    for row in counters:
+        name = row.get("counter", "")
+        value = row.get("value", 0)
+        severity = row.get("severity", "neutral")
+        if value <= 0 or severity not in {"warning", "critical"}:
+            continue
+        warnings.append({
+            "severity": severity,
+            "message": f"PPE-Offload-Fehlerzähler '{name}' ist {value}.",
+            "counter": name,
+            "value": value,
+        })
+    return warnings
+
 def _severity_rank(severity: str) -> int:
     return {"ok": 0, "neutral": 0, "info": 1, "warning": 2, "critical": 3}.get(severity, 0)
 
@@ -4524,6 +4541,15 @@ def render_ppe_diagnosis(data: dict) -> None:
         _render_missing_ppe_section("PPE device only")
 
     st.markdown("### Offload Counter / Fehlerbewertung")
+    highlighted_counters = format_ppe_offload_error_counter_warnings(data["counters"])
+    if highlighted_counters:
+        st.markdown("**Auffällige PPE-Offload-Fehlerzähler**")
+        for row in highlighted_counters:
+            if row["severity"] == "critical":
+                st.error(row["message"])
+            else:
+                st.warning(row["message"])
+
     counters = data["counters"]
     if only_errors:
         counters = [row for row in counters if row.get("severity") in {"info", "warning", "critical"}]
