@@ -96,6 +96,22 @@ def decode_support_data_upload(filename: str, content: bytes) -> str:
     return content.decode("utf-8", errors="ignore")
 
 
+
+
+def _format_display_cell(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def normalize_display_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a UI-only dataframe copy with object cells safe for Arrow."""
+    normalized = df.copy()
+    for column in normalized.columns:
+        if normalized[column].dtype == "object":
+            normalized[column] = normalized[column].map(_format_display_cell).astype("string")
+    return normalized
+
 def format_radio_label(radio_id: int) -> str:
     band = RADIO_BAND_LABELS.get(radio_id)
     if band:
@@ -845,7 +861,7 @@ def render_dect_basis_info(info: Optional[DectBasisInfo]) -> None:
         {"Eigenschaft": "Smarthomegeräteverschlüsselung", "Wert": _format_binary_state(info.avmuleaes)},
         {"Eigenschaft": "RFPI (DECT-Basiskennung)", "Wert": info.rfpi or "k.A."},
     ]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def assess_dect_rssi(rssi: Optional[float]) -> str:
@@ -1104,7 +1120,7 @@ def render_fiber_dashboard(fiber_data: dict) -> None:
     st.subheader("VLAN Regeln")
     vlan_rules = fiber_data.get("vlan_rules", [])
     if vlan_rules:
-        st.dataframe(pd.DataFrame(vlan_rules), use_container_width=True)
+        st.dataframe(pd.DataFrame(vlan_rules), width="stretch")
     else:
         st.info("Keine VLAN-Regeln gefunden.")
 
@@ -1564,7 +1580,7 @@ def render_dsl_charts(dsl_data: dict) -> None:
             xaxis_title="Ton",
             yaxis_title=label,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 def format_mbit(value_kbits: Optional[int]) -> str:
@@ -1902,17 +1918,17 @@ def render_cable_dashboard(docsis_data: dict) -> None:
 
     st.subheader("Downstream Kanäle (DS)")
     if downstream:
-        st.dataframe(pd.DataFrame(downstream), use_container_width=True)
+        st.dataframe(pd.DataFrame(downstream), width="stretch")
     else:
         st.info("Keine plausiblen Downstream-Kanäle gefunden.")
 
     if ofdm:
         st.markdown("**OFDM (Downstream)**")
-        st.dataframe(pd.DataFrame(ofdm), use_container_width=True)
+        st.dataframe(pd.DataFrame(ofdm), width="stretch")
 
     st.subheader("Upstream Kanäle (US)")
     if upstream:
-        st.dataframe(pd.DataFrame(upstream), use_container_width=True)
+        st.dataframe(pd.DataFrame(upstream), width="stretch")
     else:
         st.info("Keine plausiblen Upstream-Kanäle gefunden.")
 
@@ -1968,12 +1984,12 @@ def render_cable_dashboard(docsis_data: dict) -> None:
             xaxis_title="Frequenz (MHz)",
             yaxis_title="Pegel (dB)",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         if usage_ranges:
             usage_df = pd.DataFrame(usage_ranges).sort_values(["Start (MHz)", "Ende (MHz)"])
             st.caption("Zuordnung der Frequenzbereiche")
-            st.dataframe(usage_df, use_container_width=True, hide_index=True)
+            st.dataframe(usage_df, width="stretch", hide_index=True)
     else:
         st.info("Keine Cable-Spektrumsdaten gefunden.")
 
@@ -2016,8 +2032,8 @@ def render_wlan_scan(networks: List[WifiNetwork]) -> None:
         labels={"rssi": "RSSI (dBm)", "ssid": "SSID", "radioband": "Band"},
         title="Gefundene WLANs nach Signalstärke",
     )
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(df, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
+    st.dataframe(df, width="stretch")
 
 
 def render_wlan_noisefloor(entries: List[WifiNoiseFloorEntry]) -> None:
@@ -2049,7 +2065,7 @@ def render_wlan_noisefloor(entries: List[WifiNoiseFloorEntry]) -> None:
         title="Noisefloor und Load pro Frequenz",
     )
     fig.for_each_annotation(lambda annotation: annotation.update(text=annotation.text.split("=")[-1]))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def render_wlan_clients(stations: List[WifiStation]) -> None:
@@ -2091,13 +2107,13 @@ def render_wlan_clients(stations: List[WifiStation]) -> None:
     if connected_df.empty:
         st.info("Keine verbundenen WLAN-Clients gefunden.")
     else:
-        st.dataframe(connected_df, use_container_width=True)
+        st.dataframe(connected_df, width="stretch")
 
     st.markdown("**Nicht verbunden**")
     if disconnected_df.empty:
         st.info("Keine nicht verbundenen WLAN-Clients gefunden.")
     else:
-        st.dataframe(disconnected_df, use_container_width=True)
+        st.dataframe(disconnected_df, width="stretch")
 
     chart_df = connected_df.copy()
     chart_df["RSSI"] = pd.to_numeric(chart_df["RSSI"], errors="coerce")
@@ -2110,7 +2126,7 @@ def render_wlan_clients(stations: List[WifiStation]) -> None:
             title="RSSI pro WLAN Client",
             labels={"RSSI": "RSSI (dBm)"},
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
@@ -2138,7 +2154,7 @@ def render_wlan_radio_load(radio_loads: List[WifiRadioLoad]) -> None:
             )
             st.plotly_chart(
                 fig,
-                use_container_width=True,
+                width="stretch",
                 key=f"wlan_radio_load_{radio.radio_id}_{index}",
             )
 
@@ -2166,8 +2182,8 @@ def render_lan_ports(ports: List[LanPort]) -> None:
         color="status",
         title="Port-Status",
     )
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(df, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
+    st.dataframe(df, width="stretch")
 
 
 def render_lan_clients(clients: List[NeighbourClient]) -> None:
@@ -2208,13 +2224,13 @@ def render_lan_clients(clients: List[NeighbourClient]) -> None:
     if connected_df.empty:
         st.info("Keine verbundenen LAN-Clients gefunden.")
     else:
-        st.dataframe(connected_df, use_container_width=True)
+        st.dataframe(connected_df, width="stretch")
 
     st.markdown("**Nicht verbunden**")
     if disconnected_df.empty:
         st.info("Keine nicht verbundenen LAN-Clients gefunden.")
     else:
-        st.dataframe(disconnected_df, use_container_width=True)
+        st.dataframe(disconnected_df, width="stretch")
 
 
 def render_telephony(accounts: List[TelephonyAccount]) -> None:
@@ -2241,7 +2257,7 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
             }
         )
 
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(summary_rows), width="stretch")
 
     for idx, account in enumerate(accounts):
         encrypted = account.transport.lower().startswith("tls") or bool(account.cipher)
@@ -2283,7 +2299,7 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
                 )
             if call_rows:
                 call_df = pd.DataFrame(call_rows)
-                st.dataframe(call_df, use_container_width=True)
+                st.dataframe(call_df, width="stretch")
                 chart_df = call_df.melt(id_vars=["Richtung"], value_vars=["Versucht", "Angenommen", "Verbunden", "Fehlgeschlagen"])
                 fig = px.bar(
                     chart_df,
@@ -2294,7 +2310,7 @@ def render_telephony(accounts: List[TelephonyAccount]) -> None:
                     title="Call-Übersicht",
                     labels={"value": "Anzahl"},
                 )
-                st.plotly_chart(fig, use_container_width=True, key=f"voip-call-chart-{idx}")
+                st.plotly_chart(fig, width="stretch", key=f"voip-call-chart-{idx}")
 
             if account.dropped_calls is not None:
                 st.metric("Dropped Calls", format_count(account.dropped_calls))
@@ -2330,7 +2346,7 @@ def render_internet_connection(connection: Optional[InternetConnection]) -> None
             "Masqadresse": connection.ipv6_masq or "-",
         },
     ]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def render_port_forwardings(forwardings: List[PortForwarding]) -> None:
@@ -2351,7 +2367,7 @@ def render_port_forwardings(forwardings: List[PortForwarding]) -> None:
                 "allow-only-from": entry.allow_only_from or "-",
             }
         )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def render_network_utilization(sections: List[AvmCounterSection]) -> None:
@@ -2406,12 +2422,12 @@ def render_network_utilization(sections: List[AvmCounterSection]) -> None:
             title="Top-Kategorien nach aggregiertem Verkehr",
             labels={"Bytes": "Bytes", "Kategorie": "Kategorie"},
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         display_df = category_df.drop(columns=["Gesamtverkehr"]).copy()
         display_df["RX gesamt"] = display_df["RX gesamt"].apply(format_bytes)
         display_df["TX gesamt"] = display_df["TX gesamt"].apply(format_bytes)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width="stretch", hide_index=True)
 
 
 def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
@@ -2443,7 +2459,7 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                 for entry in ar7_overview.dsl_ifaces
             ]
         )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
     if ar7_overview.mode == "dsldmode_full_bridge":
         st.markdown("**Bridge-Interfaces (brinterfaces)**")
@@ -2462,7 +2478,7 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                     for entry in ar7_overview.bridge_interfaces
                 ]
             )
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
         _render_dsl_ifaces()
         return
 
@@ -2484,7 +2500,7 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                     for entry in ar7_overview.vccs
                 ]
             )
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
 
         st.markdown("**VLAN-Konfiguration**")
         if not ar7_overview.vlans:
@@ -2500,7 +2516,7 @@ def render_ar7_overview(ar7_overview: Ar7Overview) -> None:
                     for entry in ar7_overview.vlans
                 ]
             )
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
         _render_dsl_ifaces()
         return
 
@@ -2590,7 +2606,7 @@ def render_events(events: List[EventEntry]) -> None:
         st.info("Keine Events gefunden.")
         return
     df = pd.DataFrame([event.__dict__ for event in events])
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(df, width="stretch")
 
 
 def render_mesh_topology(mesh: MeshTopology) -> None:
@@ -2681,7 +2697,7 @@ def render_mesh_topology(mesh: MeshTopology) -> None:
     with left_col:
         st.markdown("**Nicht verbundene Clients**")
         if disconnected_clients_rows:
-            st.dataframe(pd.DataFrame(disconnected_clients_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(disconnected_clients_rows), width="stretch", hide_index=True)
         else:
             st.success("Alle erkannten Clients sind aktuell verbunden.")
 
@@ -2884,7 +2900,7 @@ def render_dect_devices(devices: List[DectDevice]) -> None:
         )
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
 
 def parse_ratelimiter_runtime(text: str) -> List[RatelimiterRuntimeEntry]:
@@ -4426,7 +4442,7 @@ def parse_ppe_diagnosis(text: str) -> dict:
 def _ppe_dataframe(rows: List[dict], columns: Dict[str, str]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=list(columns.values()))
-    return pd.DataFrame([{label: row.get(key, "") for key, label in columns.items()} for row in rows])
+    return normalize_display_dataframe(pd.DataFrame([{label: row.get(key, "") for key, label in columns.items()} for row in rows]))
 
 
 def _render_missing_ppe_section(name: str) -> None:
@@ -4465,7 +4481,7 @@ def _render_ppe_network_correlation(data: dict) -> None:
                     for row in service_rows
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -4504,7 +4520,7 @@ def _render_ppe_network_correlation(data: dict) -> None:
                     for row in unmatched_ppe
                 ]
             ),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -4535,7 +4551,7 @@ def _render_ppe_network_correlation(data: dict) -> None:
                 for row in rows
             ]
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -4562,7 +4578,7 @@ def _render_ppe_network_correlation(data: dict) -> None:
                         for row in service_rows
                     ]
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -4643,7 +4659,7 @@ def render_ppe_diagnosis(data: dict) -> None:
                     "role": "Rolle/Einschätzung",
                 },
             ),
-            use_container_width=True,
+            width="stretch",
         )
         if data["device_tree"]:
             st.markdown("**Abgeleitete Device-Baumansicht**")
@@ -4664,7 +4680,7 @@ def render_ppe_diagnosis(data: dict) -> None:
     if hwpa_rows:
         st.dataframe(
             _ppe_dataframe(hwpa_rows, {"netdev": "Netdev", "avm_pid": "avm_pid", "ppe_ifidx": "ppe_ifidx", "ppe_port": "ppe_port", "rfs": "RFS", "hwpa_type": "HWPA Type", "status": "Status"}),
-            use_container_width=True,
+            width="stretch",
         )
     else:
         _render_missing_ppe_section("HWPA Interface Liste")
@@ -4673,7 +4689,7 @@ def render_ppe_diagnosis(data: dict) -> None:
     if data["device_only"]:
         st.dataframe(
             _ppe_dataframe(data["device_only"], {"name": "Name", "ppe_port": "PPE Index / Port", "type": "Typ", "mtu": "MTU", "base_device": "Base Device", "refs": "Refcount", "mac": "MAC-Adresse"}),
-            use_container_width=True,
+            width="stretch",
         )
         if data["device_chains"]:
             st.markdown("**Erkannte Ketten**")
@@ -4695,7 +4711,7 @@ def render_ppe_diagnosis(data: dict) -> None:
     if only_errors:
         counters = [row for row in counters if row.get("severity") in {"info", "warning", "critical"}]
     if counters:
-        st.dataframe(_ppe_dataframe(counters, {"counter": "Counter", "value": "Wert", "severity": "Bewertung"}), use_container_width=True)
+        st.dataframe(_ppe_dataframe(counters, {"counter": "Counter", "value": "Wert", "severity": "Bewertung"}), width="stretch")
     else:
         _render_missing_ppe_section("Common PPE offload counter")
 
@@ -4716,28 +4732,28 @@ def render_ppe_diagnosis(data: dict) -> None:
                     row[key] = _anonymize_ip(row[key])
         session_rows.append(row)
     if session_rows:
-        st.dataframe(pd.DataFrame(session_rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(session_rows), width="stretch")
     else:
         _render_missing_ppe_section("HWPA Sessions")
 
     detail_tabs = st.tabs(["MTU/MRU", "Flow Control", "Portshaper", "Kernelmodule"])
     with detail_tabs[0]:
         if data["mtu_mru"]:
-            st.dataframe(_ppe_dataframe(data["mtu_mru"], {"port": "Port", "mtu_hex": "MTU hex", "mtu_decimal": "MTU dezimal", "mru_hex": "MRU hex", "mru_decimal": "MRU dezimal", "assessment": "Bewertung"}), use_container_width=True)
+            st.dataframe(_ppe_dataframe(data["mtu_mru"], {"port": "Port", "mtu_hex": "MTU hex", "mtu_decimal": "MTU dezimal", "mru_hex": "MRU hex", "mru_decimal": "MRU dezimal", "assessment": "Bewertung"}), width="stretch")
         else:
             _render_missing_ppe_section("PPE MTU / MRU")
     with detail_tabs[1]:
         if data["flow_control"]:
-            st.dataframe(_ppe_dataframe(data["flow_control"], {"port": "Port", "status": "Status", "assessment": "Bewertung"}), use_container_width=True)
+            st.dataframe(_ppe_dataframe(data["flow_control"], {"port": "Port", "status": "Status", "assessment": "Bewertung"}), width="stretch")
         else:
             _render_missing_ppe_section("PPE Flow Control")
     with detail_tabs[2]:
         if data["portshaper"]:
-            st.dataframe(_ppe_dataframe(data["portshaper"], {"port": "Port", "interface": "Interface", "active": "Shaper aktiv", "cir_hex": "CIR hex", "cir_decimal": "CIR dezimal", "cbs_hex": "CBS hex", "cbs_decimal": "CBS dezimal", "frame_mode": "Frame Mode", "assessment": "Einschätzung"}), use_container_width=True)
+            st.dataframe(_ppe_dataframe(data["portshaper"], {"port": "Port", "interface": "Interface", "active": "Shaper aktiv", "cir_hex": "CIR hex", "cir_decimal": "CIR dezimal", "cbs_hex": "CBS hex", "cbs_decimal": "CBS dezimal", "frame_mode": "Frame Mode", "assessment": "Einschätzung"}), width="stretch")
         else:
             _render_missing_ppe_section("PPE Portshaper")
     with detail_tabs[3]:
-        st.dataframe(_ppe_dataframe(data["modules"], {"module": "Modulname", "size": "Größe", "used_by": "Used by", "detected": "Status erkannt"}), use_container_width=True)
+        st.dataframe(_ppe_dataframe(data["modules"], {"module": "Modulname", "size": "Größe", "used_by": "Used by", "detected": "Status erkannt"}), width="stretch")
 
     st.markdown("### Diagnose-Text / Entwicklerzusammenfassung")
     summary = data["developer_summary"]
@@ -5005,7 +5021,7 @@ def render_ratelimiter(
                 for entry in runtime_entries
             ]
         ).sort_values(by=["Geblockt", "Treffer"], ascending=False)
-        st.dataframe(runtime_df, use_container_width=True, hide_index=True)
+        st.dataframe(runtime_df, width="stretch", hide_index=True)
 
     if config_entries:
         st.subheader("Konfiguration")
@@ -5023,7 +5039,7 @@ def render_ratelimiter(
                 for entry in config_entries
             ]
         )
-        st.dataframe(config_df, use_container_width=True, hide_index=True)
+        st.dataframe(config_df, width="stretch", hide_index=True)
 
     if sessions:
         st.subheader("Hardware Rate-Limiter Sessions")
@@ -5042,7 +5058,7 @@ def render_ratelimiter(
                 for session in sessions
             ]
         )
-        st.dataframe(session_df, use_container_width=True, hide_index=True)
+        st.dataframe(session_df, width="stretch", hide_index=True)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Hardware Sessions", summary.get("total_sessions", 0))
